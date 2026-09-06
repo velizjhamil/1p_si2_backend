@@ -1,13 +1,37 @@
 # backend/app/schemas/auth.py
-from pydantic import BaseModel, EmailStr
+from uuid import UUID
 
-# Lo que el frontend (Angular/Flutter) nos enviará
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
 class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+    """CU1 — cuerpo del POST /login."""
 
-# Lo que el backend responderá si el login es exitoso
+    correo: EmailStr
+    password: str = Field(min_length=1)
+
+
+class RolResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id_rol: UUID
+    nombre_rol: str
+
+
+class UserResponse(BaseModel):
+    """Respuesta de usuario — NUNCA incluye el campo password (regla #6)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id_usuario: UUID
+    nombre: str
+    correo: EmailStr
+    estado: bool
+    rol: RolResponse
+
+
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: str
-    rol: str
+    token_type: str = "Bearer"
+    expires_in: int  # segundos hasta la expiración
+    user: UserResponse

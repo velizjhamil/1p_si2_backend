@@ -2,11 +2,8 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Credenciales de conexión (Usuario: postgres, Clave: tu_contraseña_real)
-# En un futuro, sacaremos esto a un archivo oculto .env por seguridad
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:admin123@localhost:5432/tienda_ropa"
+from app.core.config import settings
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+engine = create_engine(settings.database_url)
 
-# Esta sesión es la que inyectaremos en nuestros endpoints para hacer consultas
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

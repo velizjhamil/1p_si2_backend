@@ -1,18 +1,31 @@
 # backend/app/schemas/usuario.py
+from uuid import UUID
+
 from pydantic import BaseModel, EmailStr
 
-# Datos requeridos para crear un usuario
-class UsuarioCreate(BaseModel):
-    email: EmailStr
-    password: str
-    rol: str
 
-# Datos que devolveremos como respuesta (Ocultamos el password)
+class UsuarioCreate(BaseModel):
+    nombre: str
+    correo: EmailStr
+    password: str
+    id_rol: UUID
+
+
+class UsuarioUpdate(BaseModel):
+    nombre: str | None = None
+    correo: EmailStr | None = None
+    password: str | None = None
+    id_rol: UUID | None = None
+    estado: bool | None = None
+
+
 class UsuarioResponse(BaseModel):
-    id: int
-    email: EmailStr
-    rol: str
-    is_active: bool
+    id_usuario: UUID
+    id_rol: UUID
+    nombre: str
+    correo: EmailStr
+    estado: bool
+    rol: str | None = None  # nombre_rol via relationship
 
     class Config:
-        from_attributes = True # Permite a Pydantic leer los objetos de SQLAlchemy
+        from_attributes = True

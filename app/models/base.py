@@ -1,4 +1,6 @@
 # backend/app/models/base.py
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import DeclarativeBase
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    """Base declarativa SQLAlchemy 2.0 para todos los modelos del proyecto."""

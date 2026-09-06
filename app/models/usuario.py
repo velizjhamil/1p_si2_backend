@@ -1,12 +1,43 @@
 # backend/app/models/usuario.py
-from sqlalchemy import Column, Integer, String, Boolean
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.models.base import Base
+
 
 class Usuario(Base):
     __tablename__ = "usuarios"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False) # NUNCA guardamos la contraseña en texto plano
-    rol = Column(String, nullable=False)           # Ej: "Administrador Super Usuario"
-    is_active = Column(Boolean, default=True)
+    id_usuario: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    correo: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
+    )
+    # Hash bcrypt — nunca texto plano (regla backend.md #5)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    estado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    id_rol: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("roles.id_rol", name="fk_usuario_id_rol"),
+        nullable=False,
+        index=True,
+    )
+    # Bloqueo temporal tras N intentos fallidos (RNF01)
+    intentos_fallidos: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    bloqueado_hasta: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    rol: Mapped["Rol"] = relationship(  # noqa: F821
+        back_populates="usuarios", lazy="joined"
+    )
