@@ -1,13 +1,18 @@
 # backend/app/schemas/auth.py
 from pydantic import BaseModel, EmailStr
 
-# Lo que el frontend (Angular/Flutter) nos enviará
+from app.schemas.usuario import UsuarioResponse
+
+
+# Lo que el frontend (Angular) nos enviará
 class LoginRequest(BaseModel):
-    email: EmailStr
+    correo: EmailStr
     password: str
 
-# Lo que el backend responderá si el login es exitoso
+
+# Lo que el backend responde si el login es exitoso (dentro del envelope)
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
-    rol: str
+    expires_in: int  # segundos hasta expirar el token
+    user: UsuarioResponse

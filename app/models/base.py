@@ -1,4 +1,7 @@
 # backend/app/models/base.py
-from sqlalchemy.ext.declarative import declarative_base
+# Re-export for backwards compatibility with the previous flat layout.
+# The single source of truth for the declarative Base now lives in
+# app/core/database.py so every module shares one metadata registry.
+from app.core.database import Base
 
-Base = declarative_base()
+__all__ = ["Base"]
