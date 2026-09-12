@@ -1,8 +1,9 @@
-# backend/app/api/v1/empresa.py
-from fastapi import APIRouter, Depends, HTTPException, status
+# backend/app/api/v1/endpoints/company.py
+# CU16 — Perfil Institucional de la Empresa (singleton GET/PUT /empresa).
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db
+from app.api.deps import get_db
 from app.modules.empresa.models import Empresa
 from app.schemas.empresa import EmpresaRead, EmpresaUpdate
 
@@ -38,10 +39,10 @@ def _obtener_o_crear_empresa(db: Session) -> Empresa:
 
 
 # Rutas duales ("") y ("/"): el frontend llama /api/v1/empresa SIN barra
-# final y Starlette solo registraba /api/v1/empresa/ (exigiendo la barra),
-# respondiendo 307 redirect — que con CORS + Authorization en el navegador
-# degrada a error. Con ambas rutas registradas, cada path responde 200
-# directo, sin redirect.
+# final y Starlette solo registraba /api/v1/empresa/ (por @router.get("/")
+# + prefix), respondiendo 307 redirect — que con CORS + Authorization en el
+# navegador degrada a error. Con ambas rutas registradas, cada path responde
+# 200 directo, sin redirect.
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
 def obtener_empresa(db: Session = Depends(get_db)):

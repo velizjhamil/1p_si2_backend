@@ -32,13 +32,13 @@ from app.core.config import get_settings  # noqa: E402
 from app.core.database import Base  # noqa: E402
 
 import app.modules.usuarios.models  # noqa: E402, F401  (roles, permisos, usuarios)
-import app.modules.empresa.models  # noqa: E402, F401  (empresas, sucursales)
-import app.modules.compras.models  # noqa: E402, F401  (proveedores)
+import app.modules.empresa.models  # noqa: E402, F401  (empresas, ciudades, sucursales)
+import app.modules.compras.models  # noqa: E402, F401  (proveedores CU23)
 
-# Tablas declaradas en el metadata cuyas tablas físicas NO existen aún en la
-# DB tienda_ropa y que NO pertenecen al paso en curso. empresas/sucursales ya
-# se migraron (CU16, migración 89ed1b1bee47); proveedores espera su CU23.
-TABLES_FILTRADAS = {"proveedores"}
+# Tablas filtradas del autogenerate: ya no hay ninguna pendiente — empresas,
+# sucursales y ciudades se migraron (CU16/CU17) y proveedores llega con su
+# propia migración manual CU23 (más seeds, fuera del autogenerate).
+TABLES_FILTRADAS: set[str] = set()
 
 
 def include_object(obj, name, type_, reflected, compare_to):

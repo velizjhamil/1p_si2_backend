@@ -1,14 +1,15 @@
-# backend/app/api/v1/auth.py
+# backend/app/api/v1/endpoints/auth.py
+# CU1 — Login: emisión de JWT con bloqueo temporal tras 5 intentos fallidos.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db
+from app.api.deps import get_db
 from app.core.security import ACCESS_TOKEN_EXPIRE_SECONDS, crear_token_acceso, verificar_password
-from app.models.usuario import Usuario
+from app.modules.usuarios.models import Usuario
 from app.schemas.auth import LoginRequest, TokenResponse
-from app.schemas.usuario import RolResponse, UsuarioResponse
+from app.schemas.usuario import UsuarioResponse
 
 router = APIRouter()
 

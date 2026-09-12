@@ -2,16 +2,22 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import auth, empresa, usuarios
+from app.api.v1.endpoints import (
+    auth,
+    branches,
+    company,
+    dashboard,
+    roles,
+    suppliers,
+    users,
+)
 from app.core.config import get_settings
-from app.core.database import engine
-from app.models.base import Base
 
 # Importar TODOS los módulos de modelos para que sus tablas se registren
 # en el metadata compartido antes de cualquier operación DDL futura.
 import app.modules.usuarios.models  # noqa: F401  (usuarios, roles, permisos)
-import app.modules.empresa.models  # noqa: F401  (empresas, sucursales)
-import app.modules.compras.models  # noqa: F401  (proveedores)
+import app.modules.empresa.models  # noqa: F401  (empresas, ciudades, sucursales)
+import app.modules.compras.models  # noqa: F401  (proveedores CU23)
 
 app = FastAPI(
     title="Attention E-Commerce API",
@@ -41,11 +47,19 @@ def home():
     }
 
 
-# Conectamos los enrutadores (Endpoints)
+# Conectamos los enrutadores (Endpoints) — desacoplados por CU en
+# app/api/v1/endpoints/. Los prefijos NO cambian (contratos de API intactos).
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Autenticación"])
-app.include_router(usuarios.router, prefix="/api/v1/usuarios", tags=["Usuarios"])
-# Catálogos de solo lectura + matriz: GET/POST /api/v1/roles, GET /api/v1/permisos,
-# PUT /api/v1/roles/{id}/permisos
-app.include_router(usuarios.catalogos_router, prefix="/api/v1", tags=["Roles y Permisos"])
+app.include_router(users.router, prefix="/api/v1/usuarios", tags=["Usuarios"])
+# CU4 + CU5: catálogos de roles y permisos + matriz (montados directo bajo
+# /api/v1 porque los consumen varias vistas de Angular)
+app.include_router(roles.router, prefix="/api/v1", tags=["Roles y Permisos"])
 # CU16: perfil institucional — GET/PUT /api/v1/empresa
-app.include_router(empresa.router, prefix="/api/v1/empresa", tags=["Empresa"])
+app.include_router(company.router, prefix="/api/v1/empresa", tags=["Empresa"])
+# CU17: gestión de sucursales + catálogo de ciudades
+app.include_router(branches.router, prefix="/api/v1/sucursales", tags=["Sucursales"])
+app.include_router(branches.ciudades_router, prefix="/api/v1/ciudades", tags=["Ciudades"])
+# CU23: gestión de proveedores — GET/POST/PUT/DELETE /api/v1/proveedores
+app.include_router(suppliers.router, prefix="/api/v1/proveedores", tags=["Proveedores"])
+# Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
+app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
