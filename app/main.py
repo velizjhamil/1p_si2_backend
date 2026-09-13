@@ -5,11 +5,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.endpoints import (
     auth,
     branches,
+    catalogo,
+    categories,
     company,
     dashboard,
+    inventario,
+    products,
+    reservas,
     roles,
     suppliers,
     users,
+    variantes,
 )
 from app.core.config import get_settings
 
@@ -18,6 +24,8 @@ from app.core.config import get_settings
 import app.modules.usuarios.models  # noqa: F401  (usuarios, roles, permisos)
 import app.modules.empresa.models  # noqa: F401  (empresas, ciudades, sucursales)
 import app.modules.compras.models  # noqa: F401  (proveedores CU23)
+import app.modules.inventario.models  # noqa: F401  (productos CU6, tallas/colores CU7, categorias CU9, colecciones/temporadas CU24)
+import app.modules.ventas.models  # noqa: F401  (reservas CU14, detalle_reservas)
 
 app = FastAPI(
     title="Attention E-Commerce API",
@@ -61,5 +69,23 @@ app.include_router(branches.router, prefix="/api/v1/sucursales", tags=["Sucursal
 app.include_router(branches.ciudades_router, prefix="/api/v1/ciudades", tags=["Ciudades"])
 # CU23: gestión de proveedores — GET/POST/PUT/DELETE /api/v1/proveedores
 app.include_router(suppliers.router, prefix="/api/v1/proveedores", tags=["Proveedores"])
+# CU9: gestión de categorías — GET/POST/PUT/DELETE /api/v1/categorias
+app.include_router(categories.router, prefix="/api/v1/categorias", tags=["Categorías"])
+# CU24: temporadas y colecciones — CRUD /api/v1/temporadas y /api/v1/colecciones
+app.include_router(catalogo.router, prefix="/api/v1/colecciones", tags=["Colecciones"])
+app.include_router(
+    catalogo.temporadas_router, prefix="/api/v1/temporadas", tags=["Temporadas"]
+)
+# CU7: tallas y colores — CRUD /api/v1/tallas y /api/v1/colores
+app.include_router(variantes.router, prefix="/api/v1/tallas", tags=["Tallas"])
+app.include_router(
+    variantes.colores_router, prefix="/api/v1/colores", tags=["Colores"]
+)
+# CU6: gestión de productos — GET/POST/PUT/DELETE /api/v1/productos
+app.include_router(products.router, prefix="/api/v1/productos", tags=["Productos"])
+# CU14: reservas de prendas — GET/POST /api/v1/reservas, PATCH/DELETE por id
+app.include_router(reservas.router, prefix="/api/v1/reservas", tags=["Reservas"])
+# CU22: inventario/kardex — GET /api/v1/inventario/stock|movimientos, POST movimientos
+app.include_router(inventario.router, prefix="/api/v1/inventario", tags=["Inventario"])
 # Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])

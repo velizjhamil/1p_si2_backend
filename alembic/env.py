@@ -34,6 +34,7 @@ from app.core.database import Base  # noqa: E402
 import app.modules.usuarios.models  # noqa: E402, F401  (roles, permisos, usuarios)
 import app.modules.empresa.models  # noqa: E402, F401  (empresas, ciudades, sucursales)
 import app.modules.compras.models  # noqa: E402, F401  (proveedores CU23)
+import app.modules.inventario.models  # noqa: E402, F401  (categorias CU9, colecciones/temporadas CU24)
 
 # Tablas filtradas del autogenerate: ya no hay ninguna pendiente — empresas,
 # sucursales y ciudades se migraron (CU16/CU17) y proveedores llega con su
