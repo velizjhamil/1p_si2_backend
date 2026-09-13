@@ -1,6 +1,5 @@
 # backend/app/modules/ventas/models.py
-# Paquete "Gestión Venta" — CU14 Reservas (Carrito/Ventas/Pagos llegarán
-# con sus CUs de ciclos posteriores).
+# Paquete "Gestión Venta" — CU14 Reservas, CU15+CU21 Carrito/Checkout.
 from datetime import date, datetime
 
 from sqlalchemy import (
@@ -100,4 +99,107 @@ class DetalleReserva(Base):
             f"<DetalleReserva(id_detalle={self.id_detalle}, "
             f"reserva={self.id_reserva}, producto={self.id_producto}, "
             f"cant={self.cantidad})>"
+        )
+
+
+class Venta(Base):
+    """Venta procesada por el checkout (CU15+CU21).
+
+    Ciclo de pago: PENDIENTE -> PAGADO (pasarela aprueba) o RECHAZADO.
+    El checkout registra la venta ya PAGADA (mock de pasarela), descuenta
+    stock de productos y escribe el kardex SALIDA en la misma transacción.
+    `codigo` es el comprobante legible del ticket (ATT-xxxxxx).
+    """
+
+    __tablename__ = "ventas"
+    __table_args__ = (
+        CheckConstraint(
+            "metodo_pago IN ('QR', 'EFECTIVO', 'TARJETA')", name="metodo_pago_valido"
+        ),
+        CheckConstraint(
+            "estado_pago IN ('PENDIENTE', 'PAGADO', 'RECHAZADO')",
+            name="estado_pago_valido",
+        ),
+        CheckConstraint("total >= 0", name="total_no_negativo"),
+        CheckConstraint("costo_envio >= 0", name="costo_envio_no_negativo"),
+    )
+
+    id_venta: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, index=True
+    )
+    # Cliente que compró (rol C del sistema; también del token)
+    id_cliente: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("usuarios.id_usuario"), nullable=False, index=True
+    )
+    fecha_venta: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    total: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    costo_envio: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0
+    )
+    metodo_pago: Mapped[str] = mapped_column(String(20), nullable=False)
+    estado_pago: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDIENTE")
+    # Comprobante legible del ticket (ATT-xxxxxx)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
+    comprobante_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Datos de entrega/facturación (snapshot congelado de la compra)
+    nombre_cliente: Mapped[str] = mapped_column(String(150), nullable=False)
+    correo: Mapped[str] = mapped_column(String(100), nullable=False)
+    telefono: Mapped[str] = mapped_column(String(20), nullable=False)
+    direccion: Mapped[str] = mapped_column(String(255), nullable=False)
+    ciudad: Mapped[str] = mapped_column(String(100), nullable=False)
+    referencia: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Relaciones
+    cliente: Mapped["Usuario"] = relationship(lazy="joined")  # noqa: F821
+    detalles: Mapped[list["DetalleVenta"]] = relationship(
+        back_populates="venta", lazy="selectin", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Venta(id_venta={self.id_venta}, codigo={self.codigo!r}, "
+            f"total={self.total}, estado_pago={self.estado_pago!r})>"
+        )
+
+
+class DetalleVenta(Base):
+    """Línea de venta (CU15+CU21) — producto, cantidad, precio y subtotal.
+
+    `precio_unitario` congela el precio REAL del catálogo al momento de
+    la compra (lo calcula el backend, nunca el cliente). `talla` y
+    `color` congelan la variante seleccionada en el carrito.
+    """
+
+    __tablename__ = "detalle_ventas"
+
+    id_detalle: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, index=True
+    )
+    id_venta: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("ventas.id_venta", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    id_producto: Mapped[int] = mapped_column(
+        Integer, ForeignKey("productos.id_producto"), nullable=False, index=True
+    )
+    cantidad: Mapped[int] = mapped_column(Integer, nullable=False)
+    precio_unitario: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    subtotal: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    # Variante comprada (talla+color seleccionadas en el carrito)
+    talla: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Relaciones
+    venta: Mapped["Venta"] = relationship(back_populates="detalles")
+    producto: Mapped["Producto"] = relationship(lazy="joined")  # noqa: F821
+
+    def __repr__(self) -> str:
+        return (
+            f"<DetalleVenta(id_detalle={self.id_detalle}, venta={self.id_venta}, "
+            f"producto={self.id_producto}, cant={self.cantidad})>"
         )

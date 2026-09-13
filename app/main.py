@@ -10,12 +10,14 @@ from app.api.v1.endpoints import (
     company,
     dashboard,
     inventario,
+    probador,
     products,
     reservas,
     roles,
     suppliers,
     users,
     variantes,
+    ventas,
 )
 from app.core.config import get_settings
 
@@ -25,7 +27,8 @@ import app.modules.usuarios.models  # noqa: F401  (usuarios, roles, permisos)
 import app.modules.empresa.models  # noqa: F401  (empresas, ciudades, sucursales)
 import app.modules.compras.models  # noqa: F401  (proveedores CU23)
 import app.modules.inventario.models  # noqa: F401  (productos CU6, tallas/colores CU7, categorias CU9, colecciones/temporadas CU24)
-import app.modules.ventas.models  # noqa: F401  (reservas CU14, detalle_reservas)
+import app.modules.ventas.models  # noqa: F401  (reservas CU14, ventas/detalle CU15+CU21)
+import app.modules.probador.models  # noqa: F401  (fotos_usuario y simulaciones CU8)
 
 app = FastAPI(
     title="Attention E-Commerce API",
@@ -87,5 +90,11 @@ app.include_router(products.router, prefix="/api/v1/productos", tags=["Productos
 app.include_router(reservas.router, prefix="/api/v1/reservas", tags=["Reservas"])
 # CU22: inventario/kardex — GET /api/v1/inventario/stock|movimientos, POST movimientos
 app.include_router(inventario.router, prefix="/api/v1/inventario", tags=["Inventario"])
+# CU15+CU21: carrito/checkout — POST /api/v1/ventas/checkout, GET /api/v1/ventas
+app.include_router(ventas.router, prefix="/api/v1/ventas", tags=["Ventas"])
+# CU8: probador virtual AR — subir-foto, probar, lookbook, historial
+app.include_router(
+    probador.router, prefix="/api/v1/probador-virtual", tags=["Probador Virtual"]
+)
 # Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
