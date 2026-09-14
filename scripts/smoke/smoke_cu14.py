@@ -1,9 +1,12 @@
 # Smoke tests CU14 — Reservas (TestClient, sin necesidad del server levantado)
-# Ejecutar: python smoke_cu14.py
+# Ejecutar desde la raiz del backend: python scripts/smoke/smoke_cu14.py
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 
-sys.path.insert(0, ".")
+# Inserta la raiz del backend en sys.path independientemente del CWD.
+# scripts/smoke/smoke_cu14.py -> scripts/smoke -> scripts -> <backend root>
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fastapi.testclient import TestClient
 
 from app.main import app
