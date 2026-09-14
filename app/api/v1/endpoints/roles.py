@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.modules.usuarios.models import Permiso, Rol
 from app.schemas.permiso import PermisoRead
-from app.schemas.rol import RolCreate, RolPermisosUpdate, RolRead
+from app.schemas.rol import RolCreate, RolPermisosUpdate, RolRead, RolUpdate
 
 router = APIRouter()
 
@@ -104,3 +104,70 @@ def listar_permisos(db: Session = Depends(get_db)):
         )
 
     return _envelope(agrupados)
+
+
+@router.put("/roles/{id_rol}", response_model=None)
+def actualizar_rol(
+    id_rol: UUID,
+    rol_in: RolUpdate,
+    db: Session = Depends(get_db),
+):
+    """CU4: Actualiza los datos básicos de un rol."""
+    rol = db.get(Rol, id_rol)
+    if not rol:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rol no encontrado",
+        )
+
+    if rol_in.nombre_rol is not None and rol_in.nombre_rol != rol.nombre_rol:
+        existente = db.query(Rol).filter(Rol.nombre_rol == rol_in.nombre_rol).first()
+        if existente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El rol '{rol_in.nombre_rol}' ya existe.",
+            )
+        rol.nombre_rol = rol_in.nombre_rol
+
+    if rol_in.descripcion is not None:
+        rol.descripcion = rol_in.descripcion
+
+    if rol_in.permiso_ids is not None:
+        permisos = _obtener_permisos_validados(db, rol_in.permiso_ids)
+        rol.permisos = permisos
+
+    db.commit()
+    db.refresh(rol)
+    return _envelope(RolRead.model_validate(rol))
+
+
+@router.delete("/roles/{id_rol}", response_model=None)
+def eliminar_rol(
+    id_rol: UUID,
+    db: Session = Depends(get_db),
+):
+    """CU4: Elimina un rol si no es esencial y no tiene usuarios asignados."""
+    rol = db.get(Rol, id_rol)
+    if not rol:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rol no encontrado",
+        )
+
+    # Validación roles esenciales
+    roles_protegidos = ["ASU", "ADMIN", "ADMINISTRADOR"]
+    if rol.nombre_rol.upper() in roles_protegidos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No se puede eliminar el rol esencial '{rol.nombre_rol}'.",
+        )
+
+    if rol.cantidad_usuarios > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No se puede eliminar el rol '{rol.nombre_rol}' porque tiene {rol.cantidad_usuarios} usuario(s) asignado(s).",
+        )
+
+    db.delete(rol)
+    db.commit()
+    return _envelope({"id_rol": str(id_rol)})
