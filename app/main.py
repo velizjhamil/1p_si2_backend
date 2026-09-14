@@ -40,9 +40,16 @@ app = FastAPI(
 # frontend Angular en localhost:4200 necesita permiso explícito.
 settings = get_settings()
 
+# Convertir CORS_ORIGINS a lista si viene como string
+cors_origins = settings.CORS_ORIGINS
+if isinstance(cors_origins, str):
+    cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+
+print(f"🌐 CORS configured with origins: {cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

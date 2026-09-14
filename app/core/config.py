@@ -14,9 +14,12 @@ alembic/env.py):
        abajo) compuestas como postgresql://user:pass@host:port/dbname
        (dialecto psycopg2) — el .env real del proyecto define estas claves.
 """
+import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Raíz del backend: app/core/config.py -> app/core -> app -> <backend root>
@@ -49,15 +52,36 @@ class Settings(BaseSettings):
     DATABASE_URL: str | None = None
 
     # --- JWT (app/core/security.py) ---
-    SECRET_KEY: str = "clave_super_secreta_atention"  # fallback; .env la sobreescribe
+    # ⚠️ IMPORTANTE: En producción (Render), esta clave DEBE ser configurada
+    # como variable de entorno. El fallback es solo para desarrollo local.
+    SECRET_KEY: str = "clave_super_secreta_atention_CAMBIAR_EN_PRODUCCION"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # --- CORS (app/main.py) ---
-    CORS_ORIGINS: list[str] = [
+    # Soporta dos formatos:
+    # 1. JSON array: CORS_ORIGINS='["https://app.vercel.app","http://localhost:4200"]'
+    # 2. Lista Python: CORS_ORIGINS=["https://app.vercel.app","http://localhost:4200"]
+    CORS_ORIGINS: str | list[str] = [
         "http://localhost:4200",
         "http://127.0.0.1:4200",
     ]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        """Parsea CORS_ORIGINS desde JSON string o lista directa."""
+        if isinstance(v, str):
+            # Intentar parsear como JSON array
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+            # Si no es JSON, asumir CSV (compatibilidad)
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
 
     @property
     def database_url(self) -> str:
@@ -74,3 +98,12 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Settings singleton: evita releer el .env en cada import."""
     return Settings()
+
+
+def get_cors_origins() -> list[str]:
+    """Retorna la lista de orígenes CORS configurados (para logging/debug)."""
+    settings = get_settings()
+    origins = settings.CORS_ORIGINS
+    if isinstance(origins, str):
+        return origins.split(",")
+    return origins
