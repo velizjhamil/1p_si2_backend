@@ -45,7 +45,7 @@ cors_origins = settings.CORS_ORIGINS
 if isinstance(cors_origins, str):
     cors_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
 
-print(f"🌐 CORS configured with origins: {cors_origins}")
+print(f"[CORS] Configured with origins: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
