@@ -35,6 +35,11 @@ import app.modules.usuarios.models  # noqa: E402, F401  (roles, permisos, usuari
 import app.modules.empresa.models  # noqa: E402, F401  (empresas, ciudades, sucursales)
 import app.modules.compras.models  # noqa: E402, F401  (proveedores CU23)
 import app.modules.inventario.models  # noqa: E402, F401  (categorias CU9, colecciones/temporadas CU24)
+import app.modules.ventas.models  # noqa: E402, F401  (reservas CU14, ventas/detalle CU15+CU21)
+import app.modules.probador.models  # noqa: E402, F401  (fotos_usuario y simulaciones CU8)
+import app.modules.descuentos.models  # noqa: E402, F401  (descuentos/cupones CU12)
+import app.modules.devoluciones.models  # noqa: E402, F401  (devoluciones y detalle_devoluciones CU13)
+import app.modules.notificaciones.models  # noqa: E402, F401  (notificaciones CU10)
 
 # Tablas filtradas del autogenerate: ya no hay ninguna pendiente — empresas,
 # sucursales y ciudades se migraron (CU16/CU17) y proveedores llega con su

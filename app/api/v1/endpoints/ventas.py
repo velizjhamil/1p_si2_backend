@@ -12,9 +12,10 @@
 #   6. INSERT kardex SALIDA por producto (movimientos_inventario CU22)
 #   7. COMMIT — o ROLLBACK completo si algo falla
 import secrets
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_
+from sqlalchemy import Date, cast, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -30,6 +31,10 @@ router = APIRouter()
 # total del backend coincida con lo que vio el cliente en el checkout.
 ENVIO_GRATIS_DESDE = 300
 COSTO_ENVIO = 25
+
+# Roles con permiso para registrar ventas POS (CU11). El Cliente (C)
+# queda fuera: solo puede comprar por el flujo online (CU15+CU21).
+ROLES_POS = ("ASU", "GS", "V")
 
 
 def _envelope(data, message: str = "Operación exitosa", **extra) -> dict:
@@ -77,6 +82,8 @@ def _serializar_venta(v: Venta) -> dict:
             "referencia": v.referencia,
         },
         "cliente_id": str(v.id_cliente),
+        "vendedor_id": str(v.id_vendedor) if v.id_vendedor else None,
+        "tipo_venta": "POS" if v.id_vendedor else "ONLINE",
     }
 
 
@@ -102,9 +109,20 @@ def procesar_checkout(
     db: Session = Depends(get_db),
     usuario_actual: Usuario = Depends(get_current_user),
 ):
-    """CU15+CU21: Procesa la compra del carrito en UNA transacción.
+    """CU15+CU21 (digital) + CU11 (POS): Procesa la venta en UNA transacción.
 
-    - Cliente: del token de la sesión.
+    Flujos soportados:
+    - ONLINE (default): Cliente compra desde el e-commerce. El id_cliente
+      se toma del token. El Vendedor queda NULL.
+    - POS: Vendedor/GS/ASU cobra en mostrador. El id_cliente debe venir
+      en payload.id_cliente_override (debe existir y tener rol C). El
+      id_vendedor se setea con el id del token.
+
+    Restricciones:
+    - Un Cliente (rol C) NUNCA puede usar tipo_venta='POS' aunque lo
+      mande en el payload: el backend lo rechaza con 403.
+    - tipo_venta='POS' sin id_cliente_override -> 422.
+    - id_cliente_override con un usuario que no es rol C -> 422.
     - Precios: resueltos desde productos.precio_venta (DB) — el payload
       NO lleva precios (anti-manipulación).
     - Stock: FOR UPDATE OF productos + validación; 409 si no alcanza,
@@ -112,6 +130,51 @@ def procesar_checkout(
     - Kardex: registra SALIDA por producto (CU22) en la misma tx.
     - Pasarela: mock — la venta queda PAGADA (la real llega con su CU).
     """
+    # --- 0. Resolver tipo de venta y validar coherencia con el rol ------------
+    rol_nombre = usuario_actual.rol.nombre_rol if usuario_actual.rol else ""
+
+    if payload.tipo_venta == "POS":
+        # Solo roles con permiso POS pueden usar este flujo.
+        if rol_nombre not in ROLES_POS:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "El modo POS solo está disponible para Vendedor, "
+                    "Gerente de Sucursal o Administrador."
+                ),
+            )
+        if payload.id_cliente_override is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Para registrar una venta POS debe indicar el cliente "
+                    "(id_cliente_override)."
+                ),
+            )
+        # Verificar que el cliente existe y tiene rol C.
+        cliente = db.get(Usuario, payload.id_cliente_override)
+        if not cliente:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No existe el cliente con id {payload.id_cliente_override}.",
+            )
+        if not cliente.rol or cliente.rol.nombre_rol != "C":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"El usuario con id {payload.id_cliente_override} no es un "
+                    "cliente (rol C)."
+                ),
+            )
+        id_cliente_final = cliente.id_usuario
+        id_vendedor_final = usuario_actual.id_usuario
+    else:
+        # ONLINE: el cliente SIEMPRE es el usuario del token, sin importar
+        # qué manden en el payload. Esto previene que un Cliente autenticado
+        # compre a nombre de otro.
+        id_cliente_final = usuario_actual.id_usuario
+        id_vendedor_final = None
+
     # --- 1. Bloquear y resolver productos --------------------------------------
     # of=Producto obligatorio: las relaciones lazy="joined" generan outer
     # joins y PostgreSQL rechaza FOR UPDATE directo (lecciones CU14/CU22).
@@ -158,7 +221,8 @@ def procesar_checkout(
     # --- 4. Registrar venta + detalles ------------------------------------------
     entrega = payload.datos_entrega
     venta = Venta(
-        id_cliente=usuario_actual.id_usuario,
+        id_cliente=id_cliente_final,
+        id_vendedor=id_vendedor_final,
         total=total,
         costo_envio=costo_envio,
         metodo_pago=payload.metodo_pago,
@@ -188,6 +252,11 @@ def procesar_checkout(
         )
 
     # --- 5. Descontar stock + kardex SALIDA (misma transacción) ----------------
+    motivo_venta = (
+        f"Venta POS {venta.codigo} (vendedor: {usuario_actual.correo})"
+        if id_vendedor_final
+        else f"Venta {venta.codigo} (checkout online)"
+    )
     for item, producto, precio, subtotal in lineas:
         stock_anterior = producto.stock_total
         producto.stock_total = stock_anterior - item.cantidad
@@ -201,7 +270,7 @@ def procesar_checkout(
                 cantidad=item.cantidad,
                 stock_anterior=stock_anterior,
                 stock_nuevo=producto.stock_total,
-                motivo=f"Venta {venta.codigo} (checkout online)",
+                motivo=motivo_venta,
                 id_usuario=usuario_actual.id_usuario,
             )
         )
@@ -211,7 +280,11 @@ def procesar_checkout(
 
     return _envelope(
         _serializar_venta(venta),
-        message="Compra procesada correctamente.",
+        message=(
+            "Venta POS registrada correctamente."
+            if id_vendedor_final
+            else "Compra procesada correctamente."
+        ),
     )
 
 
@@ -257,19 +330,42 @@ def listar_ventas(
     estado_pago: str | None = Query(
         default=None, description="PENDIENTE | PAGADO | RECHAZADO"
     ),
+    tipo_venta: str | None = Query(
+        default=None, description="ONLINE | POS"
+    ),
+    fecha_desde: date | None = Query(
+        default=None, description="Filtra ventas con fecha_venta >= fecha_desde (YYYY-MM-DD)"
+    ),
+    fecha_hasta: date | None = Query(
+        default=None, description="Filtra ventas con fecha_venta <= fecha_hasta (YYYY-MM-DD)"
+    ),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """CU15+CU21: Historial de ventas (los Clientes solo ven las suyas).
+    """CU15+CU21 + CU11: Historial de ventas con aislamiento por rol.
 
-    Filtros: búsqueda por código/nombre/correo, método de pago y estado.
+    Aislamiento de visibilidad (forzado por rol del token, no bypaseable
+    desde el frontend):
+    - C (Cliente): solo ve SUS compras (id_cliente == user.id_usuario).
+    - V (Vendedor): solo ve las ventas POS que ÉL registró
+      (id_vendedor == user.id_usuario).
+    - GS (Gerente de Sucursal): ve TODAS las ventas (no aplica filtro
+      de visibilidad, pero sigue respetando q/metodo/estado/fechas).
+    - ASU (Administrador): ve TODAS las ventas.
+
+    Filtros: búsqueda por código/nombre/correo, método de pago, estado,
+    tipo de venta y rango de fechas (inclusivo en ambos extremos).
     """
     query = db.query(Venta)
 
-    # Un Cliente solo ve su propio historial de compras
-    es_cliente = usuario.rol and usuario.rol.nombre_rol == "C"
-    if es_cliente:
+    rol_nombre = usuario.rol.nombre_rol if usuario.rol else ""
+
+    # Aislamiento por rol (filtros WHERE no bypaseables desde frontend)
+    if rol_nombre == "C":
         query = query.filter(Venta.id_cliente == usuario.id_usuario)
+    elif rol_nombre == "V":
+        query = query.filter(Venta.id_vendedor == usuario.id_usuario)
+    # GS y ASU no llevan filtro de visibilidad: ven todo.
 
     if q:
         term = f"%{q}%"
@@ -284,6 +380,19 @@ def listar_ventas(
         query = query.filter(Venta.metodo_pago == metodo_pago)
     if estado_pago:
         query = query.filter(Venta.estado_pago == estado_pago)
+    # tipo_venta: filtro derivado de id_vendedor IS NULL/NOT NULL
+    if tipo_venta == "ONLINE":
+        query = query.filter(Venta.id_vendedor.is_(None))
+    elif tipo_venta == "POS":
+        query = query.filter(Venta.id_vendedor.is_not(None))
+    if fecha_desde:
+        query = query.filter(
+            cast(Venta.fecha_venta, Date) >= fecha_desde
+        )
+    if fecha_hasta:
+        query = query.filter(
+            cast(Venta.fecha_venta, Date) <= fecha_hasta
+        )
 
     total = query.count()
     items = (

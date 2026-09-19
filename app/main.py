@@ -9,9 +9,13 @@ from app.api.v1.endpoints import (
     categories,
     company,
     dashboard,
+    descuentos,
+    devoluciones,
     inventario,
+    notificaciones,
     probador,
     products,
+    reportes,
     reservas,
     roles,
     suppliers,
@@ -29,6 +33,9 @@ import app.modules.compras.models  # noqa: F401  (proveedores CU23)
 import app.modules.inventario.models  # noqa: F401  (productos CU6, tallas/colores CU7, categorias CU9, colecciones/temporadas CU24)
 import app.modules.ventas.models  # noqa: F401  (reservas CU14, ventas/detalle CU15+CU21)
 import app.modules.probador.models  # noqa: F401  (fotos_usuario y simulaciones CU8)
+import app.modules.descuentos.models  # noqa: F401  (descuentos/cupones CU12)
+import app.modules.devoluciones.models  # noqa: F401  (devoluciones y detalle_devoluciones CU13)
+import app.modules.notificaciones.models  # noqa: F401  (notificaciones CU10)
 
 app = FastAPI(
     title="Attention E-Commerce API",
@@ -99,9 +106,19 @@ app.include_router(reservas.router, prefix="/api/v1/reservas", tags=["Reservas"]
 app.include_router(inventario.router, prefix="/api/v1/inventario", tags=["Inventario"])
 # CU15+CU21: carrito/checkout — POST /api/v1/ventas/checkout, GET /api/v1/ventas
 app.include_router(ventas.router, prefix="/api/v1/ventas", tags=["Ventas"])
+# CU12: gestion de descuentos/cupones — CRUD /api/v1/descuentos (GS/ASU)
+app.include_router(descuentos.router, prefix="/api/v1/descuentos", tags=["Descuentos"])
 # CU8: probador virtual AR — subir-foto, probar, lookbook, historial
 app.include_router(
     probador.router, prefix="/api/v1/probador-virtual", tags=["Probador Virtual"]
 )
+# CU13: gestion de devoluciones — CRUD /api/v1/devoluciones (cliente solicita, V/GS/ASU procesan)
+app.include_router(devoluciones.router, prefix="/api/v1/devoluciones", tags=["Devoluciones"])
+# CU10: gestion de notificaciones — CRUD /api/v1/notificaciones (bandeja in-app por usuario)
+app.include_router(notificaciones.router, prefix="/api/v1/notificaciones", tags=["Notificaciones"])
+# CU20: gestion de reportes — panel ejecutivo (ASU/GS). READ-ONLY sobre
+# ventas / inventario / rendimiento de vendedores. Sin prefijo extra:
+# los sub-paths viven en el router (/ventas, /inventario, /rendimiento-vendedores).
+app.include_router(reportes.router, prefix="/api/v1/reportes", tags=["Reportes"])
 # Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])

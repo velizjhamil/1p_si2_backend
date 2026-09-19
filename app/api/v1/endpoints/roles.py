@@ -7,8 +7,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
-from app.modules.usuarios.models import Permiso, Rol
+from app.api.deps import get_current_user, get_db
+from app.modules.usuarios.models import Permiso, Rol, Usuario
 from app.schemas.permiso import PermisoRead
 from app.schemas.rol import RolCreate, RolPermisosUpdate, RolRead, RolUpdate
 
@@ -18,6 +18,16 @@ router = APIRouter()
 def _envelope(data) -> dict:
     """Envelope estándar del backend: {status, data, message}."""
     return {"status": "success", "data": data, "message": "Operación exitosa"}
+
+
+def _validar_admin(usuario: Usuario) -> None:
+    """Verifica que el usuario autenticado tenga rol de administrador (ASU o ADMIN)."""
+    nombre_rol = usuario.rol.nombre_rol.upper() if usuario.rol and usuario.rol.nombre_rol else ""
+    if nombre_rol not in ("ASU", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido a administradores.",
+        )
 
 
 def _obtener_permisos_validados(db: Session, permiso_ids: list[int]) -> list[Permiso]:
@@ -36,15 +46,24 @@ def _obtener_permisos_validados(db: Session, permiso_ids: list[int]) -> list[Per
 
 
 @router.get("/roles", response_model=None)
-def listar_roles(db: Session = Depends(get_db)):
-    """CU4 (lectura): Lista todos los roles con sus permisos heredados."""
+def listar_roles(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU4 (lectura): Lista todos los roles con sus permisos heredados — solo Administrador."""
+    _validar_admin(current_user)
     roles = db.query(Rol).order_by(Rol.nombre_rol).all()
     return _envelope([RolRead.model_validate(r) for r in roles])
 
 
 @router.post("/roles", response_model=None, status_code=status.HTTP_201_CREATED)
-def crear_rol(rol_in: RolCreate, db: Session = Depends(get_db)):
-    """CU4: Crea un rol con sus permisos (matriz de la vista unificada)."""
+def crear_rol(
+    rol_in: RolCreate,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU4: Crea un rol con sus permisos (matriz de la vista unificada) — solo Administrador."""
+    _validar_admin(current_user)
     # 1. Nombre de rol único
     if db.query(Rol).filter(Rol.nombre_rol == rol_in.nombre_rol).first():
         raise HTTPException(
@@ -69,11 +88,13 @@ def actualizar_permisos_rol(
     id_rol: UUID,
     payload: RolPermisosUpdate,
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """CU4+CU5: Reemplaza los permisos de un rol (matriz de checkboxes).
+    """CU4+CU5: Reemplaza los permisos de un rol (matriz de checkboxes) — solo Administrador.
 
     Estrategia replace: la lista enviada ES el estado final del rol.
     """
+    _validar_admin(current_user)
     rol = db.get(Rol, id_rol)
     if not rol:
         raise HTTPException(
@@ -90,12 +111,16 @@ def actualizar_permisos_rol(
 
 
 @router.get("/permisos", response_model=None)
-def listar_permisos(db: Session = Depends(get_db)):
-    """CU5 (lectura): Lista los permisos agrupados por módulo.
+def listar_permisos(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU5 (lectura): Lista los permisos agrupados por módulo — solo Administrador.
 
     El frontend renderiza un bloque por módulo (Usuarios, Ventas, ...), así
     que agrupamos aquí y evitamos lógica de agrupamiento en el cliente.
     """
+    _validar_admin(current_user)
     permisos = db.query(Permiso).order_by(Permiso.modulo, Permiso.id).all()
     agrupados: dict[str, list[PermisoRead]] = {}
     for permiso in permisos:
@@ -111,8 +136,10 @@ def actualizar_rol(
     id_rol: UUID,
     rol_in: RolUpdate,
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """CU4: Actualiza los datos básicos de un rol."""
+    """CU4: Actualiza los datos básicos de un rol — solo Administrador."""
+    _validar_admin(current_user)
     rol = db.get(Rol, id_rol)
     if not rol:
         raise HTTPException(
@@ -145,8 +172,10 @@ def actualizar_rol(
 def eliminar_rol(
     id_rol: UUID,
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """CU4: Elimina un rol si no es esencial y no tiene usuarios asignados."""
+    """CU4: Elimina un rol si no es esencial y no tiene usuarios asignados — solo Administrador."""
+    _validar_admin(current_user)
     rol = db.get(Rol, id_rol)
     if not rol:
         raise HTTPException(

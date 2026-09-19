@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_current_user, get_db
 from app.core.security import obtener_hash_password
 from app.modules.usuarios.models import Usuario
 from app.modules.usuarios.models import Rol
@@ -19,18 +19,37 @@ def _envelope(data) -> dict:
     return {"status": "success", "data": data, "message": "Operación exitosa"}
 
 
+def _validar_admin(usuario: Usuario) -> None:
+    """Verifica que el usuario autenticado tenga rol de administrador (ASU o ADMIN)."""
+    nombre_rol = usuario.rol.nombre_rol.upper() if usuario.rol and usuario.rol.nombre_rol else ""
+    if nombre_rol not in ("ASU", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido a administradores.",
+        )
+
+
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
-def listar_usuarios(db: Session = Depends(get_db)):
-    """CU3: Lista todos los usuarios (sin password)."""
+def listar_usuarios(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU3: Lista todos los usuarios (sin password) — solo Administrador."""
+    _validar_admin(current_user)
     usuarios = db.query(Usuario).all()
     return _envelope([UsuarioResponse.model_validate(u) for u in usuarios])
 
 
 @router.post("", response_model=None, status_code=status.HTTP_201_CREATED)
 @router.post("/", response_model=None, status_code=status.HTTP_201_CREATED)
-def crear_usuario(usuario_in: UsuarioCreate, db: Session = Depends(get_db)):
-    """CU3: Registra un usuario (rol por nombre_rol)."""
+def crear_usuario(
+    usuario_in: UsuarioCreate,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU3: Registra un usuario (rol por nombre_rol) — solo Administrador."""
+    _validar_admin(current_user)
     # 1. Correo único
     if db.query(Usuario).filter(Usuario.correo == usuario_in.correo).first():
         raise HTTPException(
@@ -64,8 +83,13 @@ def crear_usuario(usuario_in: UsuarioCreate, db: Session = Depends(get_db)):
 
 
 @router.patch("/{id_usuario}/toggle-status", response_model=None)
-def alternar_estado_usuario(id_usuario: UUID, db: Session = Depends(get_db)):
-    """CU3: Activa/inactiva un usuario alternando su campo `estado`."""
+def alternar_estado_usuario(
+    id_usuario: UUID,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU3: Activa/inactiva un usuario alternando su campo `estado` — solo Administrador."""
+    _validar_admin(current_user)
     usuario = db.get(Usuario, id_usuario)
     if not usuario:
         raise HTTPException(
@@ -85,11 +109,13 @@ def actualizar_usuario(
     id_usuario: UUID,
     usuario_in: UsuarioUpdate,
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
-    """CU3: Actualiza nombre, apellido, correo, rol (y opcionalmente password/estado).
+    """CU3: Actualiza nombre, apellido, correo, rol (y opcionalmente password/estado) — solo Administrador.
 
     None en el payload significa "no cambiar" ese campo (PATCH semantics sobre PUT).
     """
+    _validar_admin(current_user)
     usuario = db.get(Usuario, id_usuario)
     if not usuario:
         raise HTTPException(

@@ -43,12 +43,35 @@ token_a, _ = login("admin@attention.com", "Admin123!")
 HA = {"Authorization": f"Bearer {token_a}"}
 
 # --- 2. Stock inicial de los productos -----------------------------------------
+# Lookup por nombre funciona en Linux pero falla en Windows cp1252 si el
+# nombre trae acentos/UTF-8 (la consola rompe la decodificacion). Para
+# hacerlo portable, resolvemos por id_producto conocido y comparamos
+# con .get() en lugar de subscript ([]) para no explotar si no esta.
 r = client.get("/api/v1/productos?limit=100", headers=HA)
-productos = {p["nombre"]: p for p in r.json()["data"]}
-p_camisa = productos["Camisa Oxford Formal"]  # precio 189.90, stock 42
-p_polo = productos["Polo Básico Algodón"]  # precio 79.50, stock 120
+productos_por_id = {p["id_producto"]: p for p in r.json()["data"]}
+# Camisa Oxford Formal = id 1, stock 42, precio 189.90
+# Polo Basico Algodon = id ?, lo buscamos por palabras (sin acentos) para
+# que sobreviva la consola cp1252.
+p_camisa = productos_por_id[1]
+p_polo = next(
+    (
+        p
+        for p in productos_por_id.values()
+        if "Polo" in p["nombre"] and "Algod" in p["nombre"]
+    ),
+    None,
+)
+check("lookup Camisa (id=1)", p_camisa is not None)
+check("lookup Polo (por palabras)", p_polo is not None)
 stock_camisa, stock_polo = p_camisa["stock_total"], p_polo["stock_total"]
-print(f"  .. Camisa: {stock_camisa} x Bs {p_camisa['precio_venta']}, Polo: {stock_polo} x Bs {p_polo['precio_venta']}")
+print(
+    "  .. Camisa: {} x Bs {}, Polo: {} x Bs {}".format(
+        stock_camisa,
+        p_camisa["precio_venta"],
+        stock_polo,
+        p_polo["precio_venta"],
+    )
+)
 
 # --- 3. POST /checkout — compra exitosa (envío gratis >= 300) ------------------
 payload = {
@@ -61,7 +84,7 @@ payload = {
         "nombre_cliente": "Cliente Demo Atencion",
         "correo": "cliente@attention.com",
         "telefono": "77123456",
-        "direccion": "Av. Monseñor Rivero #123",
+        "direccion": "Av. Monsenor Rivero #123",
         "ciudad": "Santa Cruz",
         "referencia": "Casa de rejas verdes",
     },
@@ -84,9 +107,16 @@ if r.status_code == 201:
 
     # Stock descontado
     r = client.get("/api/v1/productos?limit=100", headers=HA)
-    ps = {p["nombre"]: p for p in r.json()["data"]}
-    check("  stock camisa -2", ps["Camisa Oxford Formal"]["stock_total"] == stock_camisa - 2, f"-> {ps['Camisa Oxford Formal']['stock_total']}")
-    check("  stock polo -1", ps["Polo Básico Algodón"]["stock_total"] == stock_polo - 1)
+    ps_por_id = {p["id_producto"]: p for p in r.json()["data"]}
+    check(
+        "  stock camisa -2",
+        ps_por_id[p_camisa["id_producto"]]["stock_total"] == stock_camisa - 2,
+        "-> {}".format(ps_por_id[p_camisa["id_producto"]]["stock_total"]),
+    )
+    check(
+        "  stock polo -1",
+        ps_por_id[p_polo["id_producto"]]["stock_total"] == stock_polo - 1,
+    )
 
     # Kardex SALIDA registrado
     r = client.get(f"/api/v1/inventario/movimientos?id_producto={p_camisa['id_producto']}&limit=5", headers=HA)
@@ -153,17 +183,30 @@ r = client.post(
 )
 check("POST items vacíos 422", r.status_code == 422, f"-> {r.status_code}")
 
-# 409 producto Inactivo (id 10 = Camisa Lino Verano, estado Inactivo en seed)
-r = client.post(
-    f"{BASE}/checkout",
-    json={
-        "items": [{"producto_id": 10, "cantidad": 1}],
-        "metodo_pago": "QR",
-        "datos_entrega": payload["datos_entrega"],
-    },
-    headers=HC,
-)
-check("POST producto Inactivo 409", r.status_code == 409, f"-> {r.status_code}")
+# 409 producto Inactivo/Agotado: se busca el primer producto que NO este
+# "Activo" (puede ser Inactivo o Agotado segun el seed actual). Antes
+# estaba hardcodeado al id=10 que ya no existe.
+r = client.get("/api/v1/productos?limit=100", headers=HA)
+ps_all = r.json()["data"]
+p_inactivo = next((p for p in ps_all if p["estado"] != "Activo"), None)
+check("hay al menos un producto no-Activo", p_inactivo is not None)
+if p_inactivo:
+    r = client.post(
+        f"{BASE}/checkout",
+        json={
+            "items": [{"producto_id": p_inactivo["id_producto"], "cantidad": 1}],
+            "metodo_pago": "QR",
+            "datos_entrega": payload["datos_entrega"],
+        },
+        headers=HC,
+    )
+    check(
+        "POST producto no-Activo 409",
+        r.status_code == 409,
+        "-> {} (id={}, estado={})".format(
+            r.status_code, p_inactivo["id_producto"], p_inactivo["estado"]
+        ),
+    )
 
 # 401 sin token
 r = client.post(f"{BASE}/checkout", json=payload)
@@ -221,8 +264,12 @@ with engine.connect() as conn:
 
 # Verificación final
 r = client.get("/api/v1/productos?limit=100", headers=HA)
-ps = {p["nombre"]: p for p in r.json()["data"]}
-check("stock final restaurado", ps["Camisa Oxford Formal"]["stock_total"] == stock_camisa and ps["Polo Básico Algodón"]["stock_total"] == stock_polo)
+ps_por_id = {p["id_producto"]: p for p in r.json()["data"]}
+check(
+    "stock final restaurado",
+    ps_por_id[p_camisa["id_producto"]]["stock_total"] == stock_camisa
+    and ps_por_id[p_polo["id_producto"]]["stock_total"] == stock_polo,
+)
 
 print(f"\nRESULTADO: {PASS} PASS / {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)

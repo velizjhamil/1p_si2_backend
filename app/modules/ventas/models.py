@@ -131,6 +131,15 @@ class Venta(Base):
     id_cliente: Mapped[str] = mapped_column(
         UUID(as_uuid=True), ForeignKey("usuarios.id_usuario"), nullable=False, index=True
     )
+    # Vendedor que cobró la venta (NULL en ventas online del Cliente).
+    # Para el POS (CU11) lo setea el endpoint cuando el rol del token es
+    # V/GS/ASU y el payload trae tipo_venta='POS'.
+    id_vendedor: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("usuarios.id_usuario", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     fecha_venta: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -153,7 +162,19 @@ class Venta(Base):
     referencia: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Relaciones
-    cliente: Mapped["Usuario"] = relationship(lazy="joined")  # noqa: F821
+    # Con id_vendedor en la tabla hay DOS FKs a usuarios.id_usuario;
+    # SQLAlchemy no puede inferir cuál usar para `cliente`, así que se
+    # especifica explícitamente con foreign_keys.
+    cliente: Mapped["Usuario"] = relationship(  # noqa: F821
+        "Usuario",
+        foreign_keys="Venta.id_cliente",
+        lazy="joined",
+    )
+    vendedor: Mapped["Usuario | None"] = relationship(  # noqa: F821
+        "Usuario",
+        foreign_keys="Venta.id_vendedor",
+        lazy="joined",
+    )
     detalles: Mapped[list["DetalleVenta"]] = relationship(
         back_populates="venta", lazy="selectin", cascade="all, delete-orphan"
     )
