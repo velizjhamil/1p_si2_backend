@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     descuentos,
     devoluciones,
     envios,
+    ia,
     inventario,
     notificaciones,
     probador,
@@ -143,6 +144,13 @@ app.include_router(
 # CU20: gestion de reportes — panel ejecutivo (ASU/GS). READ-ONLY. Sub-paths en
 # el router: /ventas, /productos-mas-vendidos, /inventario, /devoluciones y
 # /rendimiento-vendedores.
+# CU18: seguimiento de envíos — GET /api/v1/envios/seguimiento/{venta_id}
+app.include_router(envios.router, prefix="/api/v1/envios", tags=["Envíos"])
+# CU20: gestion de reportes — panel ejecutivo (ASU/GS). READ-ONLY sobre
+# ventas / inventario / rendimiento de vendedores. Sin prefijo extra:
+# los sub-paths viven en el router (/ventas, /inventario, /rendimiento-vendedores).
 app.include_router(reportes.router, prefix="/api/v1/reportes", tags=["Reportes"])
 # Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
+# Asistente IA de Recomendaciones y Chatbot con Gemini
+app.include_router(ia.router, prefix="/api/v1/ia", tags=["Inteligencia Artificial"])

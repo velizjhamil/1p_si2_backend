@@ -78,6 +78,7 @@ def _validar_acceso(n: Notificacion, usuario: Usuario) -> None:
 # ---------------------------------------------------------------------------
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
+@router.get("/mis-notificaciones", response_model=None)
 def listar_notificaciones(
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(get_current_user),

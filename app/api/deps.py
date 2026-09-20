@@ -71,6 +71,7 @@ def get_current_user(
     return usuario
 
 
+<<<<<<< Updated upstream
 def require_roles(*roles: str, detail: str | None = None):
     """Dependencia de autorización por rol (RBAC): solo pasan los roles indicados.
 
@@ -92,3 +93,31 @@ def require_roles(*roles: str, detail: str | None = None):
         return usuario
 
     return _dependencia
+=======
+def get_optional_user(
+    credenciales: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> Usuario | None:
+    """Dependencia JWT opcional para endpoints públicos.
+
+    Si viene un token válido y activo, retorna el Usuario.
+    Si no hay token o es inválido/expirado, retorna None sin lanzar excepción 401.
+    """
+    if credenciales is None:
+        return None
+
+    try:
+        payload = pyjwt.decode(credenciales.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except pyjwt.PyJWTError:
+        return None
+
+    sub = payload.get("sub")
+    if not sub:
+        return None
+
+    usuario = db.get(Usuario, sub)
+    if not usuario or not usuario.estado:
+        return None
+    return usuario
+
+>>>>>>> Stashed changes

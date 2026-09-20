@@ -3,9 +3,10 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import bearer_scheme, get_current_user, get_db
 from app.core.security import obtener_hash_password
 from app.modules.usuarios.models import Usuario
 from app.modules.usuarios.models import Rol
@@ -46,10 +47,22 @@ def listar_usuarios(
 def crear_usuario(
     usuario_in: UsuarioCreate,
     db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),
+    credenciales: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
-    """CU3: Registra un usuario (rol por nombre_rol) — solo Administrador."""
-    _validar_admin(current_user)
+    """CU3: Registra un usuario.
+
+    - Clientes (rol 'C'): autoregistro público permitido (para app mobile y tienda).
+    - Staff / Administradores (ASU, GS, V): requiere token de Administrador.
+    """
+    rol_solicitado = usuario_in.nombre_rol.upper() if usuario_in.nombre_rol else ""
+    if rol_solicitado != "C":
+        if credenciales is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token de acceso requerido para registrar usuarios de staff.",
+            )
+        current_user = get_current_user(credenciales, db)
+        _validar_admin(current_user)
     # 1. Correo único
     if db.query(Usuario).filter(Usuario.correo == usuario_in.correo).first():
         raise HTTPException(

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_optional_user, get_db
 from app.modules.descuentos.models import Descuento
 from app.modules.usuarios.models import Usuario
 from app.schemas.descuento import (
@@ -71,38 +71,16 @@ def _validar_codigo_unico(
         )
 
 
-# ---------------------------------------------------------------------------
-# GET — listado paginado con filtros
-# ---------------------------------------------------------------------------
-@router.get("", response_model=None)
-@router.get("/", response_model=None)
-def listar_descuentos(
-    db: Session = Depends(get_db),
-    usuario: Usuario = Depends(get_current_user),
-    q: Optional[str] = Query(
-        default=None, description="Busca por codigo o nombre"
-    ),
-    tipo: Optional[str] = Query(
-        default=None, description="PORCENTAJE | MONTO_FIJO"
-    ),
-    activo: Optional[bool] = Query(
-        default=None, description="Filtra por estado activo/inactivo"
-    ),
-    vigente_hoy: Optional[bool] = Query(
-        default=None,
-        description="Si true, solo descuentos vigentes en la fecha actual",
-    ),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=10, ge=1, le=100),
-):
-    """CU12: Lista descuentos con filtros basicos y paginacion.
-
-    Filtros:
-    - q: busqueda por codigo (case-insensitive) o nombre (parcial).
-    - tipo: PORCENTAJE | MONTO_FIJO.
-    - activo: true/false (estado manual).
-    - vigente_hoy: filtra por fecha_inicio <= hoy <= fecha_fin (o fecha_fin null).
-    """
+def _ejecutar_consulta_descuentos(
+    db: Session,
+    q: Optional[str] = None,
+    tipo: Optional[str] = None,
+    activo: Optional[bool] = None,
+    vigente_hoy: Optional[bool] = None,
+    page: int = 1,
+    limit: int = 10,
+) -> dict:
+    """Consulta paginada con filtros reutilizable para endpoints públicos y de gestión."""
     query = db.query(Descuento)
 
     if q:
@@ -146,6 +124,69 @@ def listar_descuentos(
         page=page,
         limit=limit,
         pages=(total + limit - 1) // limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET — listado paginado con filtros
+# ---------------------------------------------------------------------------
+@router.get("", response_model=None)
+@router.get("/", response_model=None)
+def listar_descuentos(
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+    q: Optional[str] = Query(
+        default=None, description="Busca por codigo o nombre"
+    ),
+    tipo: Optional[str] = Query(
+        default=None, description="PORCENTAJE | MONTO_FIJO"
+    ),
+    activo: Optional[bool] = Query(
+        default=None, description="Filtra por estado activo/inactivo"
+    ),
+    vigente_hoy: Optional[bool] = Query(
+        default=None,
+        description="Si true, solo descuentos vigentes en la fecha actual",
+    ),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=100),
+):
+    """CU12: Lista descuentos con filtros basicos y paginacion.
+
+    Filtros:
+    - q: busqueda por codigo (case-insensitive) o nombre (parcial).
+    - tipo: PORCENTAJE | MONTO_FIJO.
+    - activo: true/false (estado manual).
+    - vigente_hoy: filtra por fecha_inicio <= hoy <= fecha_fin (o fecha_fin null).
+    """
+    return _ejecutar_consulta_descuentos(
+        db=db,
+        q=q,
+        tipo=tipo,
+        activo=activo,
+        vigente_hoy=vigente_hoy,
+        page=page,
+        limit=limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /activos — descuentos y promociones vigentes hoy (público para clientes / tienda)
+# ---------------------------------------------------------------------------
+@router.get("/activos", response_model=None)
+def listar_descuentos_activos(
+    db: Session = Depends(get_db),
+    usuario: Optional[Usuario] = Depends(get_optional_user),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """CU12: Descuentos y cupones vigentes en la fecha actual para clientes (acceso público)."""
+    return _ejecutar_consulta_descuentos(
+        db=db,
+        activo=True,
+        vigente_hoy=True,
+        page=page,
+        limit=limit,
     )
 
 

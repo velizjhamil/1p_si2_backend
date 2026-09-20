@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
+    # --- Google Gemini AI API ---
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+
     # --- CORS (app/main.py) ---
     # Soporta dos formatos:
     # 1. JSON array: CORS_ORIGINS='["https://app.vercel.app","http://localhost:4200"]'

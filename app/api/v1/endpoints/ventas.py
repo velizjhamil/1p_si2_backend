@@ -301,6 +301,7 @@ def _procesar_venta(
 
 
 # ---------------------------------------------------------------------------
+<<<<<<< Updated upstream
 # POST /checkout — compra ONLINE: SOLO rol Cliente (C)
 # ---------------------------------------------------------------------------
 @router.post(
@@ -388,9 +389,14 @@ def obtener_venta(
 
 # ---------------------------------------------------------------------------
 # GET / — historial de ventas
+=======
+# GET / — historial de ventas (con alias /mis-compras para rol Cliente)
+>>>>>>> Stashed changes
 # ---------------------------------------------------------------------------
 # Rutas duales ("") y ("/"): sin la barra extra Starlette responde 307 que
 # con CORS + Authorization degrada a error en el navegador (lección CU16).
+# /mis-compras provee compatibilidad explícita para clientes (CU11/CU13).
+@router.get("/mis-compras", response_model=None)
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
 def listar_ventas(
@@ -482,3 +488,28 @@ def listar_ventas(
         limit=limit,
         pages=(total + limit - 1) // limit,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /{id} — detalle y comprobante de una venta
+# ---------------------------------------------------------------------------
+@router.get("/{id_venta}", response_model=None)
+def obtener_venta(
+    id_venta: int,
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(get_current_user),
+):
+    """CU15+CU21: Detalle completo de la venta con su comprobante.
+
+    Un Cliente (rol C) solo ve SUS ventas; ASU/GS/V ven cualquier venta.
+    """
+    venta = _buscar_venta(db, id_venta)
+
+    es_cliente = usuario.rol and usuario.rol.nombre_rol == "C"
+    if es_cliente and str(venta.id_cliente) != str(usuario.id_usuario):
+        raise HTTPException(
+            status_code=403,
+            detail="No tiene acceso a esta venta.",
+        )
+
+    return _envelope(_serializar_venta(venta))
