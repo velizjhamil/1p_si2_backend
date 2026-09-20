@@ -1,5 +1,6 @@
 # backend/app/api/v1/endpoints/products.py
 # CU6 — Gestión de Productos de Ropa: GET paginado/filtrado, POST, PUT, DELETE.
+# Autorización: POST/PUT/DELETE solo ASU; GET (consulta) sin restricción de rol.
 #
 # RESTRICCIÓN DE NEGOCIO (DELETE): si el producto tiene movimientos de
 # inventario (kardex, CU22 futuro), se IMPIDE la eliminación física (409).
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_roles
 from app.modules.compras.models import Proveedor
 from app.modules.inventario.models import Categoria, Color, Producto, Talla
 from app.schemas.producto import (
@@ -17,6 +18,14 @@ from app.schemas.producto import (
     ProductoCreatePayload,
     ProductoResponse,
     ProductoUpdatePayload,
+)
+
+# GESTIÓN (POST/PUT/DELETE): solo ASU. CONSULTA (GET): sin cambios (catálogo
+# usado también por el Cliente). Reutiliza deps.require_roles: 401 sin token,
+# 403 para cualquier otro rol.
+requerir_asu = require_roles(
+    "ASU",
+    detail="Solo el Administrador super usuario (ASU) puede gestionar productos.",
 )
 
 router = APIRouter()
@@ -203,8 +212,14 @@ def listar_productos(
 # ---------------------------------------------------------------------------
 # POST — crear producto con relaciones N:M
 # ---------------------------------------------------------------------------
-@router.post("", response_model=None, status_code=status.HTTP_201_CREATED)
-@router.post("/", response_model=None, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=None, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requerir_asu)],
+)
+@router.post(
+    "/", response_model=None, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requerir_asu)],
+)
 def crear_producto(producto_in: ProductoCreatePayload, db: Session = Depends(get_db)):
     """CU6: Registra un producto y sus tallas/colores en las tablas pivote."""
     _validar_nombre_unico(db, producto_in.nombre)
@@ -238,7 +253,7 @@ def crear_producto(producto_in: ProductoCreatePayload, db: Session = Depends(get
 # ---------------------------------------------------------------------------
 # PUT — actualización parcial de datos y relaciones
 # ---------------------------------------------------------------------------
-@router.put("/{id_producto}", response_model=None)
+@router.put("/{id_producto}", response_model=None, dependencies=[Depends(requerir_asu)])
 def actualizar_producto(
     id_producto: int, producto_in: ProductoUpdatePayload, db: Session = Depends(get_db)
 ):
@@ -284,7 +299,7 @@ def actualizar_producto(
 # ---------------------------------------------------------------------------
 # DELETE — eliminación física con verificación de movimientos (409)
 # ---------------------------------------------------------------------------
-@router.delete("/{id_producto}", response_model=None)
+@router.delete("/{id_producto}", response_model=None, dependencies=[Depends(requerir_asu)])
 def eliminar_producto(id_producto: int, db: Session = Depends(get_db)):
     """CU6: Elimina un producto FÍSICAMENTE si no tiene movimientos.
 

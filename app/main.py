@@ -3,6 +3,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import (
+    agencia_tarifas,
+    agencia_zonas,
+    agencias,
     auth,
     branches,
     catalogo,
@@ -11,6 +14,7 @@ from app.api.v1.endpoints import (
     dashboard,
     descuentos,
     devoluciones,
+    envios,
     inventario,
     notificaciones,
     probador,
@@ -36,6 +40,7 @@ import app.modules.probador.models  # noqa: F401  (fotos_usuario y simulaciones 
 import app.modules.descuentos.models  # noqa: F401  (descuentos/cupones CU12)
 import app.modules.devoluciones.models  # noqa: F401  (devoluciones y detalle_devoluciones CU13)
 import app.modules.notificaciones.models  # noqa: F401  (notificaciones CU10)
+import app.modules.delivery.models  # noqa: F401  (envios y envio_historial CU18)
 
 app = FastAPI(
     title="Attention E-Commerce API",
@@ -116,9 +121,28 @@ app.include_router(
 app.include_router(devoluciones.router, prefix="/api/v1/devoluciones", tags=["Devoluciones"])
 # CU10: gestion de notificaciones — CRUD /api/v1/notificaciones (bandeja in-app por usuario)
 app.include_router(notificaciones.router, prefix="/api/v1/notificaciones", tags=["Notificaciones"])
-# CU20: gestion de reportes — panel ejecutivo (ASU/GS). READ-ONLY sobre
-# ventas / inventario / rendimiento de vendedores. Sin prefijo extra:
-# los sub-paths viven en el router (/ventas, /inventario, /rendimiento-vendedores).
+# CU18: gestion de envios — /api/v1/envios (GS/D/ASU gestionan; C consulta el suyo)
+app.include_router(envios.router, prefix="/api/v1/envios", tags=["Envios"])
+# CU19: gestion de agencias de reparto — CRUD /api/v1/agencias-reparto (ASU/GS
+# administran; D solo consulta las habilitadas)
+app.include_router(
+    agencias.router, prefix="/api/v1/agencias-reparto", tags=["Agencias de Reparto"]
+)
+# CU19: zonas de cobertura de una agencia — CRUD /api/v1/agencias-reparto/{id}/zonas
+app.include_router(
+    agencia_zonas.router,
+    prefix="/api/v1/agencias-reparto/{id_agencia}/zonas",
+    tags=["Agencias de Reparto - Zonas"],
+)
+# CU19: tarifas de una zona — CRUD /api/v1/agencias-reparto/{id}/zonas/{id_zona}/tarifas
+app.include_router(
+    agencia_tarifas.router,
+    prefix="/api/v1/agencias-reparto/{id_agencia}/zonas/{id_zona}/tarifas",
+    tags=["Agencias de Reparto - Tarifas"],
+)
+# CU20: gestion de reportes — panel ejecutivo (ASU/GS). READ-ONLY. Sub-paths en
+# el router: /ventas, /productos-mas-vendidos, /inventario, /devoluciones y
+# /rendimiento-vendedores.
 app.include_router(reportes.router, prefix="/api/v1/reportes", tags=["Reportes"])
 # Dashboard: métricas resumen del panel — GET /api/v1/dashboard/metrics (JWT)
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])

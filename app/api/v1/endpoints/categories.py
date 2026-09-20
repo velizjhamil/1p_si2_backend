@@ -11,13 +11,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_roles
 from app.modules.inventario.models import Categoria
 from app.schemas.categoria import (
     LINEAS_CATEGORIA,
     CategoriaCreate,
     CategoriaRead,
     CategoriaUpdate,
+)
+
+# GESTIÓN (POST/PUT/DELETE): solo ASU. CONSULTA (GET): sin cambios (la usan el
+# Cliente y otros módulos). Reutiliza deps.require_roles: 401 sin token, 403 otro rol.
+requerir_asu = require_roles(
+    "ASU",
+    detail="Solo el Administrador super usuario (ASU) puede gestionar categorías.",
 )
 
 router = APIRouter()
@@ -123,8 +130,18 @@ def listar_categorias(
     )
 
 
-@router.post("", response_model=None, status_code=status.HTTP_201_CREATED)
-@router.post("/", response_model=None, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=None,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requerir_asu)],
+)
+@router.post(
+    "/",
+    response_model=None,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requerir_asu)],
+)
 def crear_categoria(categoria_in: CategoriaCreate, db: Session = Depends(get_db)):
     """CU9: Registra una categoría validando nombre y línea obligatorios."""
     _validar_linea(categoria_in.linea)
@@ -143,7 +160,7 @@ def crear_categoria(categoria_in: CategoriaCreate, db: Session = Depends(get_db)
     return _envelope(CategoriaRead.model_validate(categoria))
 
 
-@router.put("/{id_categoria}", response_model=None)
+@router.put("/{id_categoria}", response_model=None, dependencies=[Depends(requerir_asu)])
 def actualizar_categoria(
     id_categoria: int, categoria_in: CategoriaUpdate, db: Session = Depends(get_db)
 ):
@@ -169,7 +186,7 @@ def actualizar_categoria(
     return _envelope(CategoriaRead.model_validate(categoria))
 
 
-@router.delete("/{id_categoria}", response_model=None)
+@router.delete("/{id_categoria}", response_model=None, dependencies=[Depends(requerir_asu)])
 def eliminar_categoria(id_categoria: int, db: Session = Depends(get_db)):
     """CU9: Elimina o desactiva con RESTRICCIÓN DE NEGOCIO.
 

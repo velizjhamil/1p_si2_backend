@@ -122,6 +122,9 @@ class Venta(Base):
         ),
         CheckConstraint("total >= 0", name="total_no_negativo"),
         CheckConstraint("costo_envio >= 0", name="costo_envio_no_negativo"),
+        CheckConstraint(
+            "tipo_entrega IN ('DOMICILIO', 'RETIRO')", name="tipo_entrega_valido"
+        ),
     )
 
     id_venta: Mapped[int] = mapped_column(
@@ -152,6 +155,11 @@ class Venta(Base):
     # Comprobante legible del ticket (ATT-xxxxxx)
     codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
     comprobante_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # CU18: DOMICILIO genera un envío (modules/delivery); RETIRO = entrega
+    # en tienda/mostrador (POS). El server_default cubre las ventas previas.
+    tipo_entrega: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="DOMICILIO", server_default="DOMICILIO"
+    )
 
     # Datos de entrega/facturación (snapshot congelado de la compra)
     nombre_cliente: Mapped[str] = mapped_column(String(150), nullable=False)

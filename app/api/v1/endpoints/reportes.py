@@ -2,88 +2,142 @@
 # CU20 - Gestion de Reportes (panel ejecutivo para Administrador y Gerente de Sucursal).
 #
 # Endpoints bajo /api/v1/reportes (prefijo puesto en main.py):
-#   GET /api/v1/reportes/ventas                      - ventas agrupadas por dia
-#   GET /api/v1/reportes/inventario                  - valorizacion + bajo stock
-#   GET /api/v1/reportes/rendimiento-vendedores     - performance POS por vendedor
+#   GET /api/v1/reportes/ventas                      - ventas del periodo (KPIs + series)
+#   GET /api/v1/reportes/productos-mas-vendidos      - ranking por unidades vendidas
+#   GET /api/v1/reportes/inventario                  - situacion + rotacion aproximada
+#   GET /api/v1/reportes/devoluciones                - devoluciones del periodo
+#   GET /api/v1/reportes/rendimiento-vendedores      - performance POS por vendedor
 #
-# Diseno comun a los 3 endpoints:
-# - READ-ONLY puro: no muta estado. La logica vive en el endpoint (no hay
-#   service.py), igual que el resto de modulos del proyecto.
-# - RBAC inline: solo ASU y GS (mismo patron que dashboard.py).
-# - Agregaciones con func.sum / func.count / func.date ejecutadas en la
-#   DB (no en Python) para soportar catalogos grandes.
-# - Aislamiento de vendedores: los vendedores V y clientes C NO pueden
-#   llegar aca (403 server-side, no depende del front).
-#
-# Decisiones de modelado:
-# - `tipo_venta` se DERIVA de `Venta.id_vendedor IS NULL` (ONLINE) vs
-#   `NOT NULL` (POS). El modelo no persiste la columna.
-# - `metodo_pago` y `estado_pago` son VARCHAR con CHECK; los aceptamos
-#   como filtro opcional y los devolvemos agrupados en el desglose.
-# - Rango de fechas default: ultimos 30 dias hasta hoy. Si el front
-#   manda `fecha_desde > fecha_hasta`, devolvemos 422 (validacion de
-#   orden explicita en el endpoint).
-from datetime import date, datetime, time, timezone
+# Diseno comun:
+# - READ-ONLY puro: no muta estado.
+# - Los 4 primeros reportes son una capa DELGADA: RBAC + traduccion de errores
+#   + envelope. Consultas y agregaciones viven en
+#   app/modules/reportes/service.py; el contrato JSON son los DTOs de
+#   app/schemas/reporte.py. Filtros comunes: fecha_inicio, fecha_fin,
+#   categoria_id, canal_venta (todos opcionales; sin fechas = ultimos 30 dias UTC).
+# - Sin resultados NO es un error: 200 con totales en cero, `sin_datos=true` y
+#   el mensaje "No se encontraron datos para los parametros ingresados."
+#   (tambien en `message` del envelope). Filtros invalidos -> 422.
+# - `rendimiento-vendedores` conserva su implementacion y contrato originales
+#   (fecha_desde/fecha_hasta, respuesta con Decimal-string); solo comparte el
+#   calculo del rango por defecto.
+# - RBAC: solo ASU y GS mediante `require_roles` (deps.py) en el decorador de
+#   cada ruta; V, C y D reciben 403 server-side, sin token 401. Alcance de
+#   datos GLOBAL (el modelo no tiene sucursal en usuarios/ventas/productos/
+#   devoluciones).
+# - `tipo_venta` de rendimiento-vendedores se DERIVA de `Venta.id_vendedor IS
+#   NULL` (ONLINE) vs `NOT NULL` (POS); el modelo no persiste la columna.
+# - Todas las fechas por defecto son UTC (ver service.hoy_utc).
+# - EXPORTACION PDF/Excel: parametro `formato` (json | pdf | xlsx) en los 5
+#   endpoints; ver `_respuesta` y app/modules/reportes/exportacion.py.
+from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Iterator, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, literal_column
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
-from app.modules.inventario.models import Categoria, Producto
-from app.modules.usuarios.models import Rol, Usuario
+from app.api.deps import get_db, require_roles
+from app.modules.reportes import exportacion, service
+from app.modules.reportes.service import ReporteFiltroError
+from app.modules.usuarios.models import Usuario
 from app.modules.ventas.models import Venta
 from app.schemas.reporte import (
-    DesglosePagosTipo,
-    InventarioReporteResponse,
-    ProductoStockItem,
+    MENSAJE_SIN_DATOS,
+    DevolucionesReporteResponse,
+    InventarioSituacionResponse,
+    ProductosMasVendidosResponse,
     RendimientoVendedoresResponse,
     VendedorRendimientoItem,
-    VentaDiariaReporte,
-    VentasReporteResponse,
+    VentasPeriodoResponse,
 )
 
 
 router = APIRouter()
 
 # Roles con acceso al panel de reportes (igual que dashboard.py).
-ROLES_REPORTES = {"ASU", "GS"}
+ROLES_REPORTES = ("ASU", "GS")
 
-# Umbral de "bajo stock" por defecto. Configurable por query param.
-UMBRAL_BAJO_STOCK_DEFAULT = 5
-
-# Cantidad maxima de filas en listas de bajo stock / agotados.
-TOP_BAJO_STOCK = 20
-
-# Defaults de paginacion (limite estricto para evitar respuestas enormes).
-LIMIT_DEFAULT = 30
-LIMIT_MAX = 90
+# Autorizacion de TODOS los reportes: la dependencia RBAC existente (deps.py),
+# declarada en el decorador de cada ruta. Se resuelve ANTES de validar los
+# parametros de query y de ejecutar la logica: sin token -> 401, rol no
+# autorizado -> 403 (aunque los parametros sean invalidos), autorizado -> 200/422.
+# No se usan los permisos granulares reportes.ver / reportes.exportar (el
+# proyecto autoriza por rol; esos permisos solo existen en el seed).
+_acceso_reportes = require_roles(
+    *ROLES_REPORTES, detail="Su rol no tiene acceso al panel de reportes."
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _require_reporte_access(usuario: Usuario) -> None:
-    """403 si el usuario no es ASU ni GS. Patron inline (no hay helper)."""
-    nombre_rol = usuario.rol.nombre_rol if usuario.rol else ""
-    if nombre_rol not in ROLES_REPORTES:
+def _envelope(data, message: str = "Operacion exitosa") -> dict:
+    """Envelope estandar del backend: {status, data, message}."""
+    return {"status": "success", "data": data, "message": message}
+
+
+def _envelope_reporte(dto) -> dict:
+    """Envelope de un reporte CU20 (DTO ya validado).
+
+    Sin datos sigue siendo 200/success: el mensaje viaja en `message` y el DTO
+    trae `sin_datos=true` + `mensaje` para que Angular lo muestre.
+    """
+    return _envelope(
+        dto.model_dump(mode="json"),
+        message=MENSAJE_SIN_DATOS if dto.sin_datos else "Operacion exitosa",
+    )
+
+
+# Formato de salida: json (contrato de siempre) | pdf | xlsx (exportacion CU20).
+# La exportacion NO tiene rutas propias: es el MISMO endpoint con el MISMO
+# service, filtros, validaciones y RBAC (401/403/422 identicos); solo cambia la
+# representacion del DTO que ya se calculo. Asi el archivo coincide exactamente
+# con el reporte que el usuario esta viendo.
+Formato = Literal["json", "pdf", "xlsx"]
+
+
+def _q_formato():
+    return Query(
+        default="json",
+        description="json (por defecto) | pdf | xlsx. pdf/xlsx descargan el reporte con estos mismos filtros.",
+    )
+
+
+def _respuesta(dto, tipo: str, formato: str, db: Session, extras: Optional[dict] = None):
+    """json -> envelope estandar; pdf/xlsx -> archivo adjunto (solo lectura)."""
+    if formato == "json":
+        return _envelope_reporte(dto)
+    filtros = getattr(dto, "filtros", None)
+    categoria = service.nombre_categoria(db, filtros.categoria_id) if filtros else None
+    archivo = exportacion.exportar(tipo, formato, dto, categoria=categoria, extras=extras)
+    return Response(
+        content=archivo.contenido,
+        media_type=archivo.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{archivo.nombre}"',
+            "Cache-Control": "no-store",  # datos de gestion: no cachear
+        },
+    )
+
+
+@contextmanager
+def _filtros_invalidos_como_422() -> Iterator[None]:
+    """Traduce ReporteFiltroError del service a HTTP 422 (dato invalido)."""
+    try:
+        yield
+    except ReporteFiltroError as exc:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Su rol no tiene acceso al panel de reportes.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         )
 
 
-def _envelope(data) -> dict:
-    """Envelope estandar del backend: {status, data, message}."""
-    return {"status": "success", "data": data, "message": "Operacion exitosa"}
-
-
 def _validar_rango(fecha_desde: date, fecha_hasta: date) -> None:
-    """422 si el rango esta invertido. Lo chequeamos aca (no en Pydantic)
-    para devolver un mensaje claro con el codigo HTTP consistente."""
+    """422 si el rango esta invertido (solo rendimiento-vendedores; los
+    reportes nuevos validan en service.construir_filtros)."""
     if fecha_desde > fecha_hasta:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -94,10 +148,13 @@ def _validar_rango(fecha_desde: date, fecha_hasta: date) -> None:
         )
 
 
-def _rango_default() -> tuple[date, date]:
-    """Default: ultimos 30 dias (inclusive)."""
-    hoy = date.today()
-    return hoy.replace(day=max(1, hoy.day - 29)), hoy
+def _rango_default(hoy: Optional[date] = None) -> tuple[date, date]:
+    """Default: ultimos 30 dias (inclusive) en UTC, cruzando mes/anio.
+
+    Delega en service.rango_por_defecto (unica implementacion). `hoy` es
+    opcional solo para poder probar con fechas fijas.
+    """
+    return service.rango_por_defecto(hoy)
 
 
 def _venta_tipo_sql() -> case:
@@ -107,307 +164,165 @@ def _venta_tipo_sql() -> case:
     return case((Venta.id_vendedor.is_(None), "ONLINE"), else_="POS")
 
 
+# Parametros de filtro comunes (mismos nombres y descripcion en los 4 reportes).
+def _q_fecha_inicio():
+    return Query(default=None, description="YYYY-MM-DD. Default: fecha_fin - 29 dias (UTC).")
+
+
+def _q_fecha_fin():
+    return Query(default=None, description="YYYY-MM-DD. Default: hoy (UTC).")
+
+
+def _q_categoria():
+    return Query(default=None, ge=1, description="Id de categoria (debe existir).")
+
+
+def _q_canal():
+    return Query(default=None, description="ONLINE | POS (derivado de id_vendedor).")
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/reportes/ventas
 # ---------------------------------------------------------------------------
-@router.get("/ventas", response_model=None)
+@router.get("/ventas", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_ventas(
     db: Session = Depends(get_db),
-    usuario: Usuario = Depends(get_current_user),
-    fecha_desde: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy - 30 dias."),
-    fecha_hasta: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy."),
-    metodo_pago: Optional[str] = Query(
-        default=None, description="Filtra: QR | EFECTIVO | TARJETA."
-    ),
-    tipo_venta: Optional[str] = Query(
-        default=None, description="Filtra: ONLINE | POS."
-    ),
-    estado_pago: Optional[str] = Query(
-        default=None, description="Filtra: PENDIENTE | PAGADO | RECHAZADO."
-    ),
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=LIMIT_DEFAULT, ge=1, le=LIMIT_MAX),
+    formato: Formato = _q_formato(),
+    fecha_inicio: Optional[date] = _q_fecha_inicio(),
+    fecha_fin: Optional[date] = _q_fecha_fin(),
+    categoria_id: Optional[int] = _q_categoria(),
+    canal_venta: Optional[str] = _q_canal(),
 ):
-    """CU20: Reporte de ventas agrupado por dia (pagina por dia, no por venta).
+    """CU20: Ventas del periodo: KPIs + series por fecha/categoria/canal/metodo de pago.
 
-    Para cada dia del rango devuelve: total_ingresos, total_operaciones,
-    ticket_promedio, desglose por metodo de pago y tipo (ONLINE/POS).
+    Solo ventas PAGADO. Contrato: VentasPeriodoResponse.
     """
-    _require_reporte_access(usuario)
-
-    if fecha_desde is None or fecha_hasta is None:
-        fecha_desde, fecha_hasta = _rango_default()
-    _validar_rango(fecha_desde, fecha_hasta)
-
-    # Construimos el rango como timestamps UTC para comparar contra
-    # `fecha_venta` (que es DateTime(timezone=True)). Tomamos [00:00:00, 23:59:59.999]
-    # del dia de inicio y fin respectivamente.
-    dt_desde = datetime.combine(fecha_desde, time.min, tzinfo=timezone.utc)
-    dt_hasta = datetime.combine(fecha_hasta, time.max, tzinfo=timezone.utc)
-
-    # Subquery base con los filtros aplicables (compartida por la lista y los totales).
-    filtros = [
-        Venta.fecha_venta >= dt_desde,
-        Venta.fecha_hasta_label if False else Venta.fecha_venta <= dt_hasta,
-    ]
-    if metodo_pago:
-        filtros.append(Venta.metodo_pago == metodo_pago)
-    if estado_pago:
-        filtros.append(Venta.estado_pago == estado_pago)
-    if tipo_venta == "ONLINE":
-        filtros.append(Venta.id_vendedor.is_(None))
-    elif tipo_venta == "POS":
-        filtros.append(Venta.id_vendedor.is_not(None))
-
-    # ---- Lista agrupada por DIA (pagina por cantidad de dias) -----------
-    tipo_col = _venta_tipo_sql().label("tipo_venta")
-    # `func.date()` en Postgres devuelve un tipo DATE.
-    dia_col = func.date(Venta.fecha_venta).label("fecha")
-
-    rows_por_dia = (
-        db.query(
-            dia_col,
-            func.coalesce(func.sum(Venta.total), 0).label("total_ingresos"),
-            func.count(Venta.id_venta).label("total_operaciones"),
+    with _filtros_invalidos_como_422():
+        filtros = service.construir_filtros(
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
         )
-        .filter(*filtros)
-        .group_by(dia_col)
-        .order_by(dia_col.desc())
-        .all()
-    )
+        resultado = service.reporte_ventas(db, filtros)
+    return _respuesta(VentasPeriodoResponse.model_validate(resultado), "ventas", formato, db)
 
-    # Sub-desglose por (dia, metodo_pago) y (dia, tipo_venta). Dos queries
-    # adicionales: cada una devuelve N filas pequenas (max ~30 dias x 3
-    # metodos = 90 filas) y se agregan en Python. Esto evita un solo
-    # GROUP BY multidimensional que seria mas opaco.
-    rows_metodo = (
-        db.query(
-            dia_col,
-            Venta.metodo_pago.label("metodo"),
-            func.coalesce(func.sum(Venta.total), 0).label("total"),
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/reportes/productos-mas-vendidos
+# ---------------------------------------------------------------------------
+@router.get("/productos-mas-vendidos", response_model=None, dependencies=[Depends(_acceso_reportes)])
+def reporte_productos_mas_vendidos(
+    db: Session = Depends(get_db),
+    formato: Formato = _q_formato(),
+    fecha_inicio: Optional[date] = _q_fecha_inicio(),
+    fecha_fin: Optional[date] = _q_fecha_fin(),
+    categoria_id: Optional[int] = _q_categoria(),
+    canal_venta: Optional[str] = _q_canal(),
+    top: int = Query(
+        default=service.TOP_DEFAULT, ge=1, le=service.TOP_MAX,
+        description="Cantidad de productos del ranking.",
+    ),
+):
+    """CU20: Ranking de productos por unidades vendidas (desde detalle_ventas).
+
+    Contrato: ProductosMasVendidosResponse.
+    """
+    with _filtros_invalidos_como_422():
+        filtros = service.construir_filtros(
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
         )
-        .filter(*filtros)
-        .group_by(dia_col, Venta.metodo_pago)
-        .all()
-    )
-
-    rows_tipo = (
-        db.query(
-            dia_col,
-            tipo_col,
-            func.count(Venta.id_venta).label("ops"),
-            func.coalesce(func.sum(Venta.total), 0).label("total"),
-        )
-        .filter(*filtros)
-        .group_by(dia_col, tipo_col)
-        .all()
-    )
-
-    # Indexamos sub-desgloses por fecha para O(1) en la fusion.
-    metodos_por_dia: dict[date, dict[str, Decimal]] = {}
-    for r in rows_metodo:
-        metodos_por_dia.setdefault(r.fecha, {})[r.metodo] = r.total
-
-    tipos_por_dia: dict[date, dict[str, dict]] = {}
-    for r in rows_tipo:
-        tipos_por_dia.setdefault(r.fecha, {})[r.tipo_venta] = {
-            "ingresos": r.total,
-            "ops": r.ops,
-        }
-
-    # ---- Fusion: construimos las filas finales ---------------------------
-    dias_con_datos: list[VentaDiariaReporte] = []
-    total_ingresos = Decimal("0")
-    total_operaciones = 0
-
-    for r in rows_por_dia:
-        ingresos = Decimal(str(r.total_ingresos))
-        ops = int(r.total_operaciones or 0)
-        ticket = (ingresos / Decimal(ops)) if ops > 0 else Decimal("0")
-
-        metodos_dia = metodos_por_dia.get(r.fecha, {})
-        tipos_dia = tipos_por_dia.get(r.fecha, {})
-
-        desglose = DesglosePagosTipo(
-            metodos_pago={k: Decimal(str(v)) for k, v in metodos_dia.items()},
-            tipos_venta={k: Decimal(str(v["ingresos"])) for k, v in tipos_dia.items()},
-            operaciones_por_tipo={k: int(v["ops"]) for k, v in tipos_dia.items()},
-        )
-        dias_con_datos.append(
-            VentaDiariaReporte(
-                fecha=r.fecha,
-                total_ingresos=ingresos,
-                total_operaciones=ops,
-                ticket_promedio=ticket,
-                desglose=desglose,
-            )
-        )
-        total_ingresos += ingresos
-        total_operaciones += ops
-
-    total_dias = len(dias_con_datos)
-    ticket_global = (
-        (total_ingresos / Decimal(total_operaciones))
-        if total_operaciones > 0
-        else Decimal("0")
-    )
-
-    # Paginacion por dia (no por venta individual).
-    inicio = (page - 1) * limit
-    fin = inicio + limit
-    items_paginados = dias_con_datos[inicio:fin]
-    pages = (total_dias + limit - 1) // limit if total_dias > 0 else 0
-
-    return _envelope(
-        VentasReporteResponse(
-            items=items_paginados,
-            total_dias=total_dias,
-            total_ingresos=total_ingresos,
-            total_operaciones=total_operaciones,
-            ticket_promedio=ticket_global,
-            page=page,
-            limit=limit,
-            pages=pages,
-            fecha_desde=fecha_desde,
-            fecha_hasta=fecha_hasta,
-        ).model_dump(mode="json")
-    )
+        resultado = service.reporte_productos_mas_vendidos(db, filtros, top)
+    return _respuesta(ProductosMasVendidosResponse.model_validate(resultado), "productos-mas-vendidos", formato, db)
 
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/reportes/inventario
 # ---------------------------------------------------------------------------
-@router.get("/inventario", response_model=None)
+@router.get("/inventario", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_inventario(
     db: Session = Depends(get_db),
-    usuario: Usuario = Depends(get_current_user),
-    umbral_bajo_stock: int = Query(
-        default=UMBRAL_BAJO_STOCK_DEFAULT,
-        ge=0,
-        le=1000,
-        description="Stock <= este umbral cuenta como 'bajo stock'.",
+    formato: Formato = _q_formato(),
+    fecha_inicio: Optional[date] = Query(
+        default=None, description="Ventana de la rotacion. Default: fecha_fin - 29 dias (UTC)."
     ),
-    top_bajo_stock: int = Query(
-        default=TOP_BAJO_STOCK,
-        ge=1,
-        le=200,
-        description="Maximo de filas en las listas bajo_stock y agotados.",
+    fecha_fin: Optional[date] = _q_fecha_fin(),
+    categoria_id: Optional[int] = _q_categoria(),
+    canal_venta: Optional[str] = Query(
+        default=None, description="ONLINE | POS. Solo afecta a unidades vendidas / rotacion."
+    ),
+    nivel_stock: Optional[str] = Query(
+        default=None, description="CRITICO (<5) | BAJO (<15) | OK. Filtra las filas."
+    ),
+    limite: int = Query(
+        default=service.LIMITE_FILAS_DEFAULT, ge=1, le=service.LIMITE_FILAS_MAX,
+        description="Maximo de filas devueltas (KPIs y conteos son del total).",
     ),
 ):
-    """CU20: Snapshot del inventario al momento de la consulta.
+    """CU20: Situacion del inventario (stock global) + rotacion aproximada.
 
-    Devuelve KPIs (totales + valorizacion) y dos listas top-N
-    (bajo stock y agotados) para que el front pinte las tarjetas y
-    las tablas ejecutivas sin pedir paginacion.
+    El stock es el actual; las fechas solo afectan a unidades vendidas y
+    rotacion. Contrato: InventarioSituacionResponse.
     """
-    _require_reporte_access(usuario)
-
-    # ---- Totales / valorizacion (1 sola query agregada) ------------------
-    agg = (
-        db.query(
-            func.count(Producto.id_producto).label("total"),
-            func.sum(
-                case((Producto.estado == "Activo", 1), else_=0)
-            ).label("activos"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (Producto.estado == "Activo", Producto.stock_total),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("stock_unidades"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            Producto.estado == "Activo",
-                            Producto.stock_total * Producto.precio_venta,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("valor_inventario"),
+    with _filtros_invalidos_como_422():
+        filtros = service.construir_filtros(
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
         )
-        .one()
+        resultado = service.reporte_inventario(db, filtros, nivel_stock, limite)
+    return _respuesta(
+        InventarioSituacionResponse.model_validate(resultado),
+        "inventario",
+        formato,
+        db,
+        extras={"nivel_stock": (nivel_stock or "").strip().upper() or None},
     )
-    total_productos = int(agg.total or 0)
-    productos_activos = int(agg.activos or 0)
-    total_stock_unidades = int(agg.stock_unidades or 0)
-    valor_inventario = Decimal(str(agg.valor_inventario or 0))
 
-    # ---- Top N productos con bajo stock (activos) -----------------------
-    bajo_stock_rows = (
-        db.query(Producto, Categoria)
-        .outerjoin(Categoria, Producto.id_categoria == Categoria.id_categoria)
-        .filter(
-            Producto.estado == "Activo",
-            Producto.stock_total <= umbral_bajo_stock,
-        )
-        .order_by(Producto.stock_total.asc(), Producto.nombre.asc())
-        .limit(top_bajo_stock)
-        .all()
-    )
-    productos_bajo_stock = [
-        ProductoStockItem(
-            id_producto=p.id_producto,
-            nombre=p.nombre,
-            stock_total=p.stock_total,
-            precio_venta=Decimal(str(p.precio_venta)),
-            valor_stock=Decimal(str(p.stock_total)) * Decimal(str(p.precio_venta)),
-            estado=p.estado,
-            categoria=cat.nombre if cat else None,
-        )
-        for p, cat in bajo_stock_rows
-    ]
 
-    # ---- Top N productos agotados ---------------------------------------
-    agotados_rows = (
-        db.query(Producto, Categoria)
-        .outerjoin(Categoria, Producto.id_categoria == Categoria.id_categoria)
-        .filter(
-            (Producto.stock_total == 0) | (Producto.estado == "Agotado")
-        )
-        .order_by(Producto.nombre.asc())
-        .limit(top_bajo_stock)
-        .all()
-    )
-    productos_agotados = [
-        ProductoStockItem(
-            id_producto=p.id_producto,
-            nombre=p.nombre,
-            stock_total=p.stock_total,
-            precio_venta=Decimal(str(p.precio_venta)),
-            valor_stock=Decimal(str(p.stock_total)) * Decimal(str(p.precio_venta)),
-            estado=p.estado,
-            categoria=cat.nombre if cat else None,
-        )
-        for p, cat in agotados_rows
-    ]
+# ---------------------------------------------------------------------------
+# GET /api/v1/reportes/devoluciones
+# ---------------------------------------------------------------------------
+@router.get("/devoluciones", response_model=None, dependencies=[Depends(_acceso_reportes)])
+def reporte_devoluciones(
+    db: Session = Depends(get_db),
+    formato: Formato = _q_formato(),
+    fecha_inicio: Optional[date] = _q_fecha_inicio(),
+    fecha_fin: Optional[date] = _q_fecha_fin(),
+    categoria_id: Optional[int] = _q_categoria(),
+    canal_venta: Optional[str] = _q_canal(),
+    estado: Optional[str] = Query(
+        default=None, description="SOLICITADA | APROBADA | RECHAZADA | COMPLETADA."
+    ),
+    top: int = Query(
+        default=service.TOP_DEFAULT, ge=1, le=service.TOP_MAX,
+        description="Productos en `por_producto`.",
+    ),
+    limite_detalle: int = Query(
+        default=service.LIMITE_FILAS_DEFAULT, ge=1, le=service.LIMITE_FILAS_MAX,
+        description="Maximo de filas de `detalle`.",
+    ),
+):
+    """CU20: Devoluciones del periodo (por fecha de solicitud).
 
-    return _envelope(
-        InventarioReporteResponse(
-            total_productos=total_productos,
-            productos_activos=productos_activos,
-            total_stock_unidades=total_stock_unidades,
-            valor_inventario=valor_inventario,
-            umbral_bajo_stock=umbral_bajo_stock,
-            productos_bajo_stock=productos_bajo_stock,
-            productos_agotados=productos_agotados,
-            generado_en=datetime.now(timezone.utc),
-        ).model_dump(mode="json")
+    Contrato: DevolucionesReporteResponse.
+    """
+    with _filtros_invalidos_como_422():
+        filtros = service.construir_filtros(
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
+        )
+        resultado = service.reporte_devoluciones(db, filtros, estado, top, limite_detalle)
+    return _respuesta(
+        DevolucionesReporteResponse.model_validate(resultado),
+        "devoluciones",
+        formato,
+        db,
+        extras={"top": top, "limite_detalle": limite_detalle},
     )
 
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/reportes/rendimiento-vendedores
 # ---------------------------------------------------------------------------
-@router.get("/rendimiento-vendedores", response_model=None)
+@router.get("/rendimiento-vendedores", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_rendimiento_vendedores(
     db: Session = Depends(get_db),
-    usuario: Usuario = Depends(get_current_user),
+    formato: Formato = _q_formato(),
     fecha_desde: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy - 30 dias."),
     fecha_hasta: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy."),
     tipo_venta: Optional[str] = Query(
@@ -425,7 +340,6 @@ def reporte_rendimiento_vendedores(
     NOT NULL. Si `tipo_venta=ONLINE`, devuelve clientes (agrupados por
     id_cliente) como 'compradores' — util para cruzar.
     """
-    _require_reporte_access(usuario)
 
     if fecha_desde is None or fecha_hasta is None:
         fecha_desde, fecha_hasta = _rango_default()
@@ -559,13 +473,14 @@ def reporte_rendimiento_vendedores(
         total_ingresos += ingresos
         total_operaciones += ops
 
-    return _envelope(
-        RendimientoVendedoresResponse(
-            items=items,
-            total_vendedores=len(items),
-            total_ingresos=total_ingresos,
-            total_operaciones=total_operaciones,
-            fecha_desde=fecha_desde,
-            fecha_hasta=fecha_hasta,
-        ).model_dump(mode="json")
+    dto = RendimientoVendedoresResponse(
+        items=items,
+        total_vendedores=len(items),
+        total_ingresos=total_ingresos,
+        total_operaciones=total_operaciones,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
     )
+    if formato != "json":  # exportacion CU20 (el JSON de siempre queda igual)
+        return _respuesta(dto, "rendimiento-vendedores", formato, db, extras={"tipo_venta": tipo_venta})
+    return _envelope(dto.model_dump(mode="json"))

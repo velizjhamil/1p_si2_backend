@@ -69,3 +69,26 @@ def get_current_user(
             detail="Usuario inactivo.",
         )
     return usuario
+
+
+def require_roles(*roles: str, detail: str | None = None):
+    """Dependencia de autorización por rol (RBAC): solo pasan los roles indicados.
+
+    - 401: sin token / token inválido (lo resuelve get_current_user).
+    - 403: usuario autenticado cuyo rol NO está en `roles`.
+    No hay excepción para ASU: si el rol no está listado, no accede.
+
+    Uso: `usuario: Usuario = Depends(require_roles("C"))`.
+    """
+
+    def _dependencia(usuario: Usuario = Depends(get_current_user)) -> Usuario:
+        rol = usuario.rol.nombre_rol if usuario.rol else ""
+        if rol not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=detail
+                or f"Acceso restringido a los roles: {', '.join(roles)}.",
+            )
+        return usuario
+
+    return _dependencia

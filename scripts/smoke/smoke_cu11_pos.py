@@ -6,7 +6,8 @@
 # - La venta queda con id_vendedor = id del token del Vendedor.
 # - tipo_venta = "POS" en la respuesta.
 # - GET /ventas filtrado por V muestra SOLO las ventas POS del V (no las ONLINE).
-# - C (Cliente) NO puede usar tipo_venta=POS aunque lo mande (403).
+# - Las ventas POS de V/GS/ASU van por POST /ventas/pos (el checkout online es solo del rol C).
+# - C (Cliente) NO puede usar tipo_venta=POS aunque lo mande a /checkout (403).
 # - POS sin id_cliente_override -> 422.
 # - id_cliente_override apuntando a un usuario que no es rol C -> 422.
 # - Filtros fecha_desde / fecha_hasta / tipo_venta funcionan.
@@ -113,7 +114,7 @@ payload_pos = {
     "tipo_venta": "POS",
     "id_cliente_override": cliente["id_usuario"],
 }
-r = client.post(f"{BASE}/checkout", json=payload_pos, headers=HV)
+r = client.post(f"{BASE}/pos", json=payload_pos, headers=HV)
 check(
     "Vendedor POST POS 201",
     r.status_code == 201,
@@ -147,7 +148,7 @@ check(
 # --- 6. POS sin id_cliente_override -> 422 ------------------------------------
 payload_sin_cliente = {**payload_pos}
 del payload_sin_cliente["id_cliente_override"]
-r = client.post(f"{BASE}/checkout", json=payload_sin_cliente, headers=HV)
+r = client.post(f"{BASE}/pos", json=payload_sin_cliente, headers=HV)
 check(
     "POS sin id_cliente_override 422",
     r.status_code == 422,
@@ -160,7 +161,7 @@ payload_cliente_malo = {
     **payload_pos,
     "id_cliente_override": vendedor["id_usuario"],
 }
-r = client.post(f"{BASE}/checkout", json=payload_cliente_malo, headers=HV)
+r = client.post(f"{BASE}/pos", json=payload_cliente_malo, headers=HV)
 check(
     "POS con override no-C 422",
     r.status_code == 422,

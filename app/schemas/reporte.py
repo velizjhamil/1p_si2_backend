@@ -5,131 +5,33 @@
 # datos. Los schemas son la frontera entre la query agregada SQL y la
 # respuesta JSON que consume el front.
 #
-# Decisiones de diseno:
-# - Tipos de reporte como Literal (alineado con el front).
-# - `fecha` se serializa como `date` ISO (YYYY-MM-DD), no datetime, para
-#   que el front lo pueda mostrar directo en la columna "Dia".
-# - `metodos_pago` y `tipos_venta` son dicts {nombre: total} en vez de
-#   listas de filas. Asi el front renderiza columnas estaticas sin
-#   necesitar mapear headers dinamicamente.
-# - `productos_bajo_stock` y `productos_agotados` incluyen solo campos
-#   que el front necesita para la tabla (id, nombre, stock, precio,
-#   estado, categoria). Sin descripcion ni imagen_url para no inflar.
+# Contenido:
+# - DTOs de los 4 reportes nuevos (ventas, productos mas vendidos, inventario,
+#   devoluciones): al final del archivo, se llenan desde app/modules/reportes/
+#   service.py con `Modelo.model_validate(resultado)`.
+# - DTOs de rendimiento-vendedores (contrato original, sin cambios).
+# El contrato antiguo de /ventas e /inventario (una fila por dia, Decimal como
+# string, lista bajo_stock/agotados) se ELIMINO: no tenia consumidores.
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-TipoReporteStr = Literal["ventas", "inventario", "rendimiento-vendedores"]
-
-
-# ---------------------------------------------------------------------------
-# Reporte de Ventas
-# ---------------------------------------------------------------------------
-class DesglosePagosTipo(BaseModel):
-    """Sub-totales por metodo de pago y tipo de venta (ONLINE/POS).
-
-    `metodos_pago` y `tipos_venta` son dicts {clave: total} para que el
-    front renderice columnas estaticas (QR / EFECTIVO / TARJETA).
-    """
-
-    metodos_pago: dict[str, Decimal] = Field(
-        default_factory=dict,
-        description="Total de ingresos por metodo de pago (QR/EFECTIVO/TARJETA).",
-    )
-    tipos_venta: dict[str, Decimal] = Field(
-        default_factory=dict,
-        description="Total de ingresos por tipo de venta (ONLINE/POS).",
-    )
-    operaciones_por_tipo: dict[str, int] = Field(
-        default_factory=dict,
-        description="Cantidad de operaciones por tipo de venta.",
-    )
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    computed_field,
+)
 
 
-class VentaDiariaReporte(BaseModel):
-    """Una fila del reporte: las metricas agregadas de UN dia.
-
-    `ticket_promedio = total_ingresos / total_operaciones` (0 si no hay ops).
-    """
-
-    fecha: date = Field(description="Dia de las operaciones (YYYY-MM-DD).")
-    total_ingresos: Decimal = Field(description="Suma del campo `total` de las ventas del dia.")
-    total_operaciones: int = Field(description="Cantidad de ventas del dia.")
-    ticket_promedio: Decimal = Field(
-        description="Promedio de ticket (total_ingresos / total_operaciones)."
-    )
-    desglose: DesglosePagosTipo = Field(
-        description="Sub-totales por metodo de pago y tipo de venta."
-    )
-
-
-class VentasReporteResponse(BaseModel):
-    """Envelope del reporte de ventas. Pagina por DIA, no por venta.
-
-    Items: una fila por dia dentro del rango, ordenadas DESC por fecha.
-    Totales: agregados de todo el rango (para tarjetas KPI del front).
-    """
-
-    items: list[VentaDiariaReporte]
-    total_dias: int = Field(description="Cantidad de dias con operaciones en el rango.")
-    total_ingresos: Decimal
-    total_operaciones: int
-    ticket_promedio: Decimal
-    page: int
-    limit: int
-    pages: int
-    fecha_desde: date
-    fecha_hasta: date
-
-
-# ---------------------------------------------------------------------------
-# Reporte de Inventario
-# ---------------------------------------------------------------------------
-class ProductoStockItem(BaseModel):
-    """Fila de la lista de productos con stock bajo o agotado.
-
-    `estado` refleja el campo `estado` del modelo Producto (Activo /
-    Inactivo / Agotado). `categoria` viene del join con categorias.
-    """
-
-    id_producto: int
-    nombre: str
-    stock_total: int
-    precio_venta: Decimal
-    valor_stock: Decimal = Field(
-        description="stock_total * precio_venta (valorizacion a precio de venta)."
-    )
-    estado: str
-    categoria: Optional[str] = None
-
-
-class InventarioReporteResponse(BaseModel):
-    """Snapshot del inventario al momento de la consulta.
-
-    `productos_bajo_stock` se limita a `top_bajo_stock` filas (default 20)
-    para no devolver listas enormes si la DB tiene miles de productos.
-    Si el front necesita paginacion, lo agregamos despues.
-    """
-
-    total_productos: int = Field(description="Cantidad de productos en el catalogo (cualquier estado).")
-    productos_activos: int
-    total_stock_unidades: int = Field(description="Suma de stock_total de productos activos.")
-    valor_inventario: Decimal = Field(
-        description="Suma de (stock_total * precio_venta) de productos activos."
-    )
-    umbral_bajo_stock: int = Field(
-        description="Umbral usado para clasificar 'bajo stock' (default 5)."
-    )
-    productos_bajo_stock: list[ProductoStockItem] = Field(
-        description="Productos activos con stock_total <= umbral_bajo_stock."
-    )
-    productos_agotados: list[ProductoStockItem] = Field(
-        description="Productos con stock_total = 0 o estado='Agotado'."
-    )
-    generado_en: datetime = Field(description="Timestamp de cuando se corrio la query.")
+TipoReporteStr = Literal[
+    "ventas",
+    "productos-mas-vendidos",
+    "inventario",
+    "devoluciones",
+    "rendimiento-vendedores",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -164,3 +66,246 @@ class RendimientoVendedoresResponse(BaseModel):
     total_operaciones: int
     fecha_desde: date
     fecha_hasta: date
+
+
+# ===========================================================================
+# CU20 - DTOs de los reportes generados por app/modules/reportes/service.py
+# ===========================================================================
+# Se crean con `Modelo.model_validate(dataclass_del_service)` (from_attributes).
+# Los DTOs de rendimiento-vendedores (arriba) no se tocan: su endpoint conserva
+# el contrato original.
+#
+# Convenciones de los DTOs nuevos:
+# - Importes en `Dinero`: Decimal en Python (sin errores de redondeo) pero
+#   NUMERO JSON (no string) para que Angular/Chart.js los use directo. Los DTOs
+#   de rendimiento-vendedores (arriba) emiten Decimal como string; estos no.
+# - Todo reporte trae `sin_datos` y `mensaje`. Sin resultados la respuesta es
+#   200 con totales en cero y listas vacias (no es un error del servidor).
+# - Las listas `por_*` ya son las series de los graficos (etiqueta + valores);
+#   Angular no recalcula nada.
+# - Alcance de datos GLOBAL: el modelo no tiene sucursal en usuarios, ventas,
+#   productos ni devoluciones (decision A del CU20).
+Dinero = Annotated[
+    Decimal, PlainSerializer(float, return_type=float, when_used="json")
+]
+
+MENSAJE_SIN_DATOS = "No se encontraron datos para los parámetros ingresados."
+
+CanalVenta = Literal["ONLINE", "POS"]
+NivelStock = Literal["CRITICO", "BAJO", "OK"]
+EstadoDevolucion = Literal["SOLICITADA", "APROBADA", "RECHAZADA", "COMPLETADA"]
+
+
+class _ReporteDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FiltrosAplicados(_ReporteDTO):
+    """Filtros efectivamente usados (ya con los valores por defecto)."""
+
+    fecha_inicio: date
+    fecha_fin: date
+    categoria_id: Optional[int] = None
+    canal_venta: Optional[CanalVenta] = None
+
+
+class _ReporteBase(_ReporteDTO):
+    filtros: FiltrosAplicados
+    sin_datos: bool = Field(
+        description="True si ningun registro cumple los filtros (mostrar `mensaje`)."
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mensaje(self) -> Optional[str]:
+        return MENSAJE_SIN_DATOS if self.sin_datos else None
+
+
+# ---------------------------------------------------------------------------
+# Ventas por periodo
+# ---------------------------------------------------------------------------
+class PuntoDiaVentas(_ReporteDTO):
+    fecha: date
+    ingresos: Dinero
+    unidades: int
+    num_ventas: int
+
+
+class FilaCategoriaVentas(_ReporteDTO):
+    id_categoria: int
+    categoria: str
+    ingresos: Dinero
+    unidades: int
+
+
+class FilaCanalVentas(_ReporteDTO):
+    canal: CanalVenta
+    ingresos: Dinero
+    num_ventas: int
+
+
+class FilaMetodoPagoVentas(_ReporteDTO):
+    metodo_pago: str
+    ingresos: Dinero
+    num_ventas: int
+
+
+class VentasPeriodoResponse(_ReporteBase):
+    """KPIs + series del reporte de ventas.
+
+    `ingresos_productos` = suma de las lineas de detalle (sin envio).
+    `total_facturado` / `total_envios` = suma de ventas.total / costo_envio;
+    son None cuando hay filtro de categoria (el envio no es atribuible).
+    Solo cuentan ventas PAGADO. No descuenta devoluciones.
+    """
+
+    num_ventas: int
+    unidades_vendidas: int
+    ingresos_productos: Dinero
+    ticket_promedio: Dinero
+    total_facturado: Optional[Dinero] = None
+    total_envios: Optional[Dinero] = None
+    por_fecha: list[PuntoDiaVentas] = Field(
+        default_factory=list, description="Un punto por dia del rango (ceros incluidos)."
+    )
+    por_categoria: list[FilaCategoriaVentas] = Field(default_factory=list)
+    por_canal: list[FilaCanalVentas] = Field(default_factory=list)
+    por_metodo_pago: list[FilaMetodoPagoVentas] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Productos mas vendidos
+# ---------------------------------------------------------------------------
+class ProductoMasVendidoItem(_ReporteDTO):
+    posicion: int = Field(description="1 = el mas vendido.")
+    id_producto: int
+    producto: str
+    id_categoria: int
+    categoria: str
+    cantidad_vendida: int
+    total_generado: Dinero
+    num_ventas: int
+
+
+class ProductosMasVendidosResponse(_ReporteBase):
+    """Ranking por unidades vendidas (desempate: ingresos, nombre)."""
+
+    top: int
+    total_productos_vendidos: int = Field(
+        description="Productos distintos con ventas en el rango (antes del top)."
+    )
+    items: list[ProductoMasVendidoItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Inventario
+# ---------------------------------------------------------------------------
+class ProductoInventarioItem(_ReporteDTO):
+    id_producto: int
+    producto: str
+    id_categoria: int
+    categoria: str
+    estado: str
+    stock_actual: int
+    precio_venta: Dinero
+    valor_stock: Dinero
+    nivel_stock: NivelStock = Field(description="CRITICO (<5), BAJO (<15) u OK (criterio CU22).")
+    unidades_vendidas: int = Field(description="Unidades vendidas en el rango de fechas.")
+    rotacion: Optional[Dinero] = Field(
+        default=None,
+        description=(
+            "APROXIMACION: unidades_vendidas / stock_actual. None si "
+            "stock_actual = 0 (ver `rotacion_disponible`)."
+        ),
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def rotacion_disponible(self) -> bool:
+        """False cuando no hay stock: la rotacion no es calculable."""
+        return self.rotacion is not None
+
+
+class InventarioSituacionResponse(_ReporteBase):
+    """Situacion del inventario al momento de la consulta.
+
+    Alcance: productos no Inactivos, stock global. Las fechas/canal de
+    `filtros` solo afectan a `unidades_vendidas` y `rotacion`.
+    """
+
+    total_productos: int
+    stock_total_unidades: int
+    valor_inventario: Dinero
+    agotados: int
+    por_nivel: dict[str, int] = Field(
+        description="Siempre con las claves CRITICO, BAJO y OK."
+    )
+    total_filas: int = Field(description="Filas que cumplen el filtro (antes del limite).")
+    limite: int
+    items: list[ProductoInventarioItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Devoluciones
+# ---------------------------------------------------------------------------
+class DevolucionesPorFecha(_ReporteDTO):
+    fecha: date
+    num_devoluciones: int
+    unidades: int
+    importe: Dinero
+
+
+class DevolucionesPorProducto(_ReporteDTO):
+    id_producto: int
+    producto: str
+    categoria: str
+    unidades: int
+    importe: Dinero
+
+
+class DevolucionesPorCategoria(_ReporteDTO):
+    id_categoria: int
+    categoria: str
+    unidades: int
+    importe: Dinero
+
+
+class DevolucionesPorEstado(_ReporteDTO):
+    estado: EstadoDevolucion
+    num_devoluciones: int
+    unidades: int
+    importe: Dinero
+
+
+class DevolucionDetalleItem(_ReporteDTO):
+    id_devolucion: int
+    fecha_solicitud: datetime
+    estado: EstadoDevolucion
+    codigo_venta: str
+    motivo: str
+    unidades: int
+    importe: Dinero = Field(description="Monto solicitado (todas las lineas).")
+
+
+class DevolucionesReporteResponse(_ReporteBase):
+    """Reporte de devoluciones (por `fecha_solicitud`).
+
+    `unidades_devueltas`, `importe_total` y las series por fecha/producto/
+    categoria EXCLUYEN las RECHAZADA. `num_devoluciones` y `por_estado`
+    incluyen todos los estados.
+    """
+
+    estado: Optional[EstadoDevolucion] = Field(
+        default=None, description="Filtro de estado aplicado, si hubo."
+    )
+    num_devoluciones: int
+    unidades_devueltas: int
+    importe_total: Dinero
+    importe_completado: Dinero = Field(description="Solo devoluciones COMPLETADA.")
+    por_estado: list[DevolucionesPorEstado] = Field(default_factory=list)
+    por_fecha: list[DevolucionesPorFecha] = Field(
+        default_factory=list, description="Un punto por dia del rango (ceros incluidos)."
+    )
+    por_producto: list[DevolucionesPorProducto] = Field(default_factory=list)
+    por_categoria: list[DevolucionesPorCategoria] = Field(default_factory=list)
+    detalle: list[DevolucionDetalleItem] = Field(default_factory=list)

@@ -71,6 +71,10 @@ class CheckoutPayload(BaseModel):
     # Requerido solo si tipo_venta='POS'; ignorado si tipo_venta='ONLINE'
     # o si el rol del token es C.
     id_cliente_override: UUID | None = None
+    # CU18 — DOMICILIO genera un envío; RETIRO es entrega en tienda.
+    # Opcional: si no viaja, ONLINE => DOMICILIO y POS => RETIRO (el
+    # frontend actual no lo envía y sigue funcionando igual).
+    tipo_entrega: Literal["DOMICILIO", "RETIRO"] | None = None
 
     @model_validator(mode="after")
     def _validar_metodo(self) -> "CheckoutPayload":
@@ -130,3 +134,5 @@ class VentaResponse(BaseModel):
     # CU11 — POS: tipo de venta registrado (ONLINE | POS). Default ONLINE
     # para ventas legacy anteriores al flag.
     tipo_venta: Literal["ONLINE", "POS"] = "ONLINE"
+    # CU18 — DOMICILIO (genera envío) | RETIRO (entrega en tienda).
+    tipo_entrega: Literal["DOMICILIO", "RETIRO"] = "DOMICILIO"

@@ -17,7 +17,17 @@ from app.core.config import get_settings
 # ---------------------------------------------------------------------------
 SQLALCHEMY_DATABASE_URL = os.environ.get("DATABASE_URL") or get_settings().database_url
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# pool_pre_ping descarta conexiones muertas (el pooler de Supabase las cierra
+# por inactividad); pool_timeout/connect_timeout evitan cuelgues indefinidos.
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=15,
+    connect_args={"connect_timeout": 10},
+)
 
 # Esta sesión es la que inyectaremos en nuestros endpoints para hacer consultas
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -8,13 +8,16 @@
 # - Temporada: fecha_fin >= fecha_inicio (422); la vigencia (Vigente/
 #   Finalizada) se deriva de la fecha actual contra el rango.
 # - DELETE de colección: 409 si tiene temporadas asociadas.
+# - Control de acceso: TODOS los endpoints (colecciones y temporadas) son
+#   exclusivos del Administrador super usuario (ASU); JWT obligatorio (401)
+#   y cualquier otro rol recibe 403.
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import inspect, or_, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_roles
 from app.modules.inventario.models import Coleccion, Temporada
 from app.schemas.catalogo import (
     ColeccionCreate,
@@ -25,11 +28,22 @@ from app.schemas.catalogo import (
     TemporadaUpdate,
 )
 
-# Router de colecciones: /api/v1/colecciones
-router = APIRouter()
+ROL_ASU = "ASU"
 
-# Router de temporadas: /api/v1/temporadas
-temporadas_router = APIRouter()
+
+# CU24: solo el Administrador super usuario (ASU) gestiona temporadas y colecciones.
+# Reutiliza el RBAC del proyecto (deps.require_roles): 401 sin token, 403 otro rol.
+requerir_asu = require_roles(
+    ROL_ASU,
+    detail="Solo el Administrador super usuario (ASU) puede gestionar temporadas y colecciones.",
+)
+
+
+# Router de colecciones: /api/v1/colecciones (solo ASU)
+router = APIRouter(dependencies=[Depends(requerir_asu)])
+
+# Router de temporadas: /api/v1/temporadas (solo ASU)
+temporadas_router = APIRouter(dependencies=[Depends(requerir_asu)])
 
 
 def _envelope(data, message: str = "Operación exitosa", **extra) -> dict:

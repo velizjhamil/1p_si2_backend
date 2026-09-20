@@ -40,6 +40,7 @@ import app.modules.probador.models  # noqa: E402, F401  (fotos_usuario y simulac
 import app.modules.descuentos.models  # noqa: E402, F401  (descuentos/cupones CU12)
 import app.modules.devoluciones.models  # noqa: E402, F401  (devoluciones y detalle_devoluciones CU13)
 import app.modules.notificaciones.models  # noqa: E402, F401  (notificaciones CU10)
+import app.modules.delivery.models  # noqa: E402, F401  (envios y envio_historial CU18)
 
 # Tablas filtradas del autogenerate: ya no hay ninguna pendiente — empresas,
 # sucursales y ciudades se migraron (CU16/CU17) y proveedores llega con su

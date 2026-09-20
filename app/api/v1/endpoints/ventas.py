@@ -18,7 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Date, cast, or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, require_roles
+from app.modules.delivery.service import crear_envio_para_venta
 from app.modules.inventario.models import MovimientoInventario, Producto
 from app.modules.usuarios.models import Usuario
 from app.modules.ventas.models import DetalleVenta, Venta
@@ -84,6 +85,7 @@ def _serializar_venta(v: Venta) -> dict:
         "cliente_id": str(v.id_cliente),
         "vendedor_id": str(v.id_vendedor) if v.id_vendedor else None,
         "tipo_venta": "POS" if v.id_vendedor else "ONLINE",
+        "tipo_entrega": v.tipo_entrega,
     }
 
 
@@ -99,29 +101,29 @@ def _buscar_venta(db: Session, id_venta: int) -> Venta:
 
 
 # ---------------------------------------------------------------------------
-# POST /checkout — procesar la compra (transacción atómica)
+# Lógica común de venta (transacción atómica). NO es una ruta: la invocan
+#   POST /checkout  (solo Cliente, flujo ONLINE)   y
+#   POST /pos       (solo V/GS/ASU, venta de mostrador).
+# El rol se autoriza en la DEPENDENCIA de cada ruta (require_roles); aquí
+# `modo` decide el flujo, no el `tipo_venta` que mande el payload.
 # ---------------------------------------------------------------------------
-@router.post(
-    "/checkout", response_model=None, status_code=status.HTTP_201_CREATED
-)
-def procesar_checkout(
+def _procesar_venta(
     payload: CheckoutPayload,
-    db: Session = Depends(get_db),
-    usuario_actual: Usuario = Depends(get_current_user),
+    db: Session,
+    usuario_actual: Usuario,
+    modo: str,
 ):
     """CU15+CU21 (digital) + CU11 (POS): Procesa la venta en UNA transacción.
 
-    Flujos soportados:
-    - ONLINE (default): Cliente compra desde el e-commerce. El id_cliente
-      se toma del token. El Vendedor queda NULL.
+    Flujos soportados (`modo`):
+    - ONLINE: Cliente compra desde el e-commerce. El id_cliente se toma
+      del token. El Vendedor queda NULL.
     - POS: Vendedor/GS/ASU cobra en mostrador. El id_cliente debe venir
       en payload.id_cliente_override (debe existir y tener rol C). El
       id_vendedor se setea con el id del token.
 
     Restricciones:
-    - Un Cliente (rol C) NUNCA puede usar tipo_venta='POS' aunque lo
-      mande en el payload: el backend lo rechaza con 403.
-    - tipo_venta='POS' sin id_cliente_override -> 422.
+    - modo=POS sin id_cliente_override -> 422.
     - id_cliente_override con un usuario que no es rol C -> 422.
     - Precios: resueltos desde productos.precio_venta (DB) — el payload
       NO lleva precios (anti-manipulación).
@@ -133,8 +135,8 @@ def procesar_checkout(
     # --- 0. Resolver tipo de venta y validar coherencia con el rol ------------
     rol_nombre = usuario_actual.rol.nombre_rol if usuario_actual.rol else ""
 
-    if payload.tipo_venta == "POS":
-        # Solo roles con permiso POS pueden usar este flujo.
+    if modo == "POS":
+        # Defensa en profundidad: la ruta /pos ya exige V/GS/ASU (require_roles).
         if rol_nombre not in ROLES_POS:
             raise HTTPException(
                 status_code=403,
@@ -220,9 +222,15 @@ def procesar_checkout(
 
     # --- 4. Registrar venta + detalles ------------------------------------------
     entrega = payload.datos_entrega
+    # CU18: ONLINE => DOMICILIO y POS (mostrador) => RETIRO, salvo que el
+    # payload indique otra cosa explícitamente.
+    tipo_entrega = payload.tipo_entrega or (
+        "RETIRO" if id_vendedor_final else "DOMICILIO"
+    )
     venta = Venta(
         id_cliente=id_cliente_final,
         id_vendedor=id_vendedor_final,
+        tipo_entrega=tipo_entrega,
         total=total,
         costo_envio=costo_envio,
         metodo_pago=payload.metodo_pago,
@@ -275,6 +283,10 @@ def procesar_checkout(
             )
         )
 
+    # --- 6. CU18: envío a domicilio (misma transacción, sin commit propio) -----
+    if tipo_entrega == "DOMICILIO":
+        crear_envio_para_venta(db, venta, usuario_actual)
+
     db.commit()
     db.refresh(venta)
 
@@ -286,6 +298,67 @@ def procesar_checkout(
             else "Compra procesada correctamente."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /checkout — compra ONLINE: SOLO rol Cliente (C)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/checkout", response_model=None, status_code=status.HTTP_201_CREATED
+)
+def procesar_checkout(
+    payload: CheckoutPayload,
+    db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(
+        require_roles(
+            "C",
+            detail=(
+                "Solo el rol Cliente puede comprar desde el carrito/checkout. "
+                "Las ventas de mostrador (POS) usan POST /api/v1/ventas/pos."
+            ),
+        )
+    ),
+):
+    """CU15+CU21: compra online del Cliente (carrito -> checkout).
+
+    - 401 sin token; 403 para cualquier rol distinto de C (ASU, GS, V, D).
+    - El id_cliente SIEMPRE es el del token; un Cliente que mande
+      tipo_venta='POS' recibe 403 (el mostrador es otro flujo: /pos).
+    """
+    if payload.tipo_venta == "POS":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "El modo POS solo está disponible para Vendedor, "
+                "Gerente de Sucursal o Administrador (POST /api/v1/ventas/pos)."
+            ),
+        )
+    return _procesar_venta(payload, db, usuario_actual, "ONLINE")
+
+
+# ---------------------------------------------------------------------------
+# POST /pos — venta de mostrador (CU11): SOLO V / GS / ASU
+# ---------------------------------------------------------------------------
+@router.post("/pos", response_model=None, status_code=status.HTTP_201_CREATED)
+def procesar_venta_pos(
+    payload: CheckoutPayload,
+    db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(
+        require_roles(
+            *ROLES_POS,
+            detail=(
+                "El modo POS solo está disponible para Vendedor, "
+                "Gerente de Sucursal o Administrador."
+            ),
+        )
+    ),
+):
+    """CU11: el Vendedor/GS/ASU registra una venta en mostrador a nombre de
+    un Cliente (id_cliente_override obligatorio). Es "registrar una venta",
+    no comprar: por eso queda fuera de la regla "solo Cliente compra".
+    El Cliente (C) y el Delivery (D) reciben 403.
+    """
+    return _procesar_venta(payload, db, usuario_actual, "POS")
 
 
 # ---------------------------------------------------------------------------
