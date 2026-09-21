@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, require_roles
+from app.api.deps import get_current_user, get_db, require_roles
 from app.modules.reportes import exportacion, service
 from app.modules.reportes.service import ReporteFiltroError
 from app.modules.usuarios.models import Usuario
@@ -181,25 +181,55 @@ def _q_canal():
     return Query(default=None, description="ONLINE | POS (derivado de id_vendedor).")
 
 
+def _q_sucursal():
+    return Query(
+        default=None,
+        description="Id de sucursal para filtrar reportes (ASU puede filtrar o ver global; GS se fuerza a su tienda).",
+    )
+
+
+def _resolver_id_sucursal_reporte(
+    usuario: Usuario, id_sucursal_param: Optional[int] = None
+) -> Optional[int]:
+    """Aislamiento estricto por sucursal para el Gerente de Sucursal (GS).
+
+    Si el rol es GS, se fuerza su id_sucursal (no puede ver reportes de otra tienda).
+    Si no tiene id_sucursal asignado, se arroja 403.
+    Para administradores (ASU), se respeta el filtro id_sucursal_param o None para global.
+    """
+    rol = (usuario.rol.nombre_rol if usuario.rol else "").upper()
+    if rol == "GS":
+        if not usuario.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El Gerente de Sucursal no tiene una sucursal asignada para consultar reportes.",
+            )
+        return usuario.id_sucursal
+    return id_sucursal_param
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/reportes/ventas
 # ---------------------------------------------------------------------------
 @router.get("/ventas", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_ventas(
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
     formato: Formato = _q_formato(),
     fecha_inicio: Optional[date] = _q_fecha_inicio(),
     fecha_fin: Optional[date] = _q_fecha_fin(),
     categoria_id: Optional[int] = _q_categoria(),
     canal_venta: Optional[str] = _q_canal(),
+    id_sucursal: Optional[int] = _q_sucursal(),
 ):
     """CU20: Ventas del periodo: KPIs + series por fecha/categoria/canal/metodo de pago.
 
     Solo ventas PAGADO. Contrato: VentasPeriodoResponse.
     """
     with _filtros_invalidos_como_422():
+        suc_id = _resolver_id_sucursal_reporte(usuario_actual, id_sucursal)
         filtros = service.construir_filtros(
-            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta, suc_id
         )
         resultado = service.reporte_ventas(db, filtros)
     return _respuesta(VentasPeriodoResponse.model_validate(resultado), "ventas", formato, db)
@@ -211,11 +241,13 @@ def reporte_ventas(
 @router.get("/productos-mas-vendidos", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_productos_mas_vendidos(
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
     formato: Formato = _q_formato(),
     fecha_inicio: Optional[date] = _q_fecha_inicio(),
     fecha_fin: Optional[date] = _q_fecha_fin(),
     categoria_id: Optional[int] = _q_categoria(),
     canal_venta: Optional[str] = _q_canal(),
+    id_sucursal: Optional[int] = _q_sucursal(),
     top: int = Query(
         default=service.TOP_DEFAULT, ge=1, le=service.TOP_MAX,
         description="Cantidad de productos del ranking.",
@@ -226,8 +258,9 @@ def reporte_productos_mas_vendidos(
     Contrato: ProductosMasVendidosResponse.
     """
     with _filtros_invalidos_como_422():
+        suc_id = _resolver_id_sucursal_reporte(usuario_actual, id_sucursal)
         filtros = service.construir_filtros(
-            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta, suc_id
         )
         resultado = service.reporte_productos_mas_vendidos(db, filtros, top)
     return _respuesta(ProductosMasVendidosResponse.model_validate(resultado), "productos-mas-vendidos", formato, db)
@@ -239,6 +272,7 @@ def reporte_productos_mas_vendidos(
 @router.get("/inventario", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_inventario(
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
     formato: Formato = _q_formato(),
     fecha_inicio: Optional[date] = Query(
         default=None, description="Ventana de la rotacion. Default: fecha_fin - 29 dias (UTC)."
@@ -248,6 +282,7 @@ def reporte_inventario(
     canal_venta: Optional[str] = Query(
         default=None, description="ONLINE | POS. Solo afecta a unidades vendidas / rotacion."
     ),
+    id_sucursal: Optional[int] = _q_sucursal(),
     nivel_stock: Optional[str] = Query(
         default=None, description="CRITICO (<5) | BAJO (<15) | OK. Filtra las filas."
     ),
@@ -256,14 +291,15 @@ def reporte_inventario(
         description="Maximo de filas devueltas (KPIs y conteos son del total).",
     ),
 ):
-    """CU20: Situacion del inventario (stock global) + rotacion aproximada.
+    """CU20: Situacion del inventario (stock global o de sucursal) + rotacion aproximada.
 
     El stock es el actual; las fechas solo afectan a unidades vendidas y
     rotacion. Contrato: InventarioSituacionResponse.
     """
     with _filtros_invalidos_como_422():
+        suc_id = _resolver_id_sucursal_reporte(usuario_actual, id_sucursal)
         filtros = service.construir_filtros(
-            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta, suc_id
         )
         resultado = service.reporte_inventario(db, filtros, nivel_stock, limite)
     return _respuesta(
@@ -281,11 +317,13 @@ def reporte_inventario(
 @router.get("/devoluciones", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_devoluciones(
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
     formato: Formato = _q_formato(),
     fecha_inicio: Optional[date] = _q_fecha_inicio(),
     fecha_fin: Optional[date] = _q_fecha_fin(),
     categoria_id: Optional[int] = _q_categoria(),
     canal_venta: Optional[str] = _q_canal(),
+    id_sucursal: Optional[int] = _q_sucursal(),
     estado: Optional[str] = Query(
         default=None, description="SOLICITADA | APROBADA | RECHAZADA | COMPLETADA."
     ),
@@ -303,8 +341,9 @@ def reporte_devoluciones(
     Contrato: DevolucionesReporteResponse.
     """
     with _filtros_invalidos_como_422():
+        suc_id = _resolver_id_sucursal_reporte(usuario_actual, id_sucursal)
         filtros = service.construir_filtros(
-            db, fecha_inicio, fecha_fin, categoria_id, canal_venta
+            db, fecha_inicio, fecha_fin, categoria_id, canal_venta, suc_id
         )
         resultado = service.reporte_devoluciones(db, filtros, estado, top, limite_detalle)
     return _respuesta(
@@ -322,12 +361,14 @@ def reporte_devoluciones(
 @router.get("/rendimiento-vendedores", response_model=None, dependencies=[Depends(_acceso_reportes)])
 def reporte_rendimiento_vendedores(
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
     formato: Formato = _q_formato(),
     fecha_desde: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy - 30 dias."),
     fecha_hasta: Optional[date] = Query(default=None, description="YYYY-MM-DD. Default: hoy."),
     tipo_venta: Optional[str] = Query(
         default=None, description="Filtra: ONLINE | POS. Si se omite, muestra ambos."
     ),
+    id_sucursal: Optional[int] = _q_sucursal(),
 ):
     """CU20: Rendimiento POS / ONLINE por vendedor en el rango.
 
@@ -345,6 +386,8 @@ def reporte_rendimiento_vendedores(
         fecha_desde, fecha_hasta = _rango_default()
     _validar_rango(fecha_desde, fecha_hasta)
 
+    suc_id = _resolver_id_sucursal_reporte(usuario_actual, id_sucursal)
+
     dt_desde = datetime.combine(fecha_desde, time.min, tzinfo=timezone.utc)
     dt_hasta = datetime.combine(fecha_hasta, time.max, tzinfo=timezone.utc)
 
@@ -355,6 +398,9 @@ def reporte_rendimiento_vendedores(
         Venta.fecha_venta >= dt_desde,
         Venta.fecha_venta <= dt_hasta,
     ]
+    if suc_id is not None:
+        filtros.append(Venta.id_sucursal == suc_id)
+
     if tipo_venta == "POS":
         filtros.append(Venta.id_vendedor.is_not(None))
     elif tipo_venta == "ONLINE":
@@ -428,17 +474,20 @@ def reporte_rendimiento_vendedores(
 
     # Tambien para POS-only (id_vendedor NOT NULL) si vamos por 'ambos'.
     if tipo_venta is None:
+        filtros_pos_q = [
+            Venta.fecha_venta >= dt_desde,
+            Venta.fecha_venta <= dt_hasta,
+            Venta.id_vendedor.is_not(None),
+        ]
+        if suc_id is not None:
+            filtros_pos_q.append(Venta.id_sucursal == suc_id)
         tipo_pos_q = (
             db.query(
                 Venta.id_vendedor.label("id_actor"),
                 tipo_col,
                 func.count(Venta.id_venta).label("ops"),
             )
-            .filter(
-                Venta.fecha_venta >= dt_desde,
-                Venta.fecha_venta <= dt_hasta,
-                Venta.id_vendedor.is_not(None),
-            )
+            .filter(*filtros_pos_q)
             .group_by(Venta.id_vendedor, tipo_col)
             .all()
         )

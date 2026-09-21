@@ -10,9 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_current_user, get_db
 from app.modules.compras.models import Proveedor
 from app.modules.empresa.models import Ciudad, Sucursal
+from app.modules.usuarios.models import Usuario
 from app.schemas.proveedor import (
     ESTADOS_PROVEEDOR,
     ProveedorCreate,
@@ -72,11 +73,7 @@ def _validar_sucursal(db: Session, sucursal_id: int | None) -> None:
 
 
 def _productos_asociados(db: Session, proveedor: Proveedor) -> int:
-    """Cuenta productos del catálogo asociados a este proveedor.
-
-    Dinámico: si la tabla `productos` no existe aún en la DB devuelve 0
-    (la restricción de negocio se activa sola cuando el catálogo llegue).
-    """
+    """Cuenta productos del catálogo asociados a este proveedor."""
     inspector = inspect(db.get_bind())
     if "productos" not in inspector.get_table_names():
         return 0
@@ -87,12 +84,12 @@ def _productos_asociados(db: Session, proveedor: Proveedor) -> int:
     return int(resultado or 0)
 
 
-# Rutas duales ("") y ("/"): sin la barra extra Starlette responde 307 que
-# con CORS + Authorization degrada a error en el navegador (lección CU16).
 @router.get("", response_model=None)
 @router.get("/", response_model=None)
 def listar_proveedores(
     db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+    sucursal_id: int | None = Query(default=None, description="Filtrar por sucursal"),
     q: str | None = Query(default=None, description="Busca por razón social, NIT/RUT o contacto"),
     categoria: str | None = Query(default=None, description="Filtra por línea/categoría"),
     estado: str | None = Query(default=None, description="Activo | Verificado | Inactivo"),
@@ -100,8 +97,20 @@ def listar_proveedores(
     page: int = Query(default=1, ge=1, description="Página (base 1)"),
     limit: int = Query(default=10, ge=1, le=100, description="Registros por página"),
 ):
-    """CU23: Lista paginada con filtros (nombre/NIT, categoría, estado, ciudad)."""
+    """CU23: Lista paginada con filtros y soporte de aislamiento por sucursal."""
     query = db.query(Proveedor)
+
+    rol_nombre = current_user.rol.nombre_rol.upper() if current_user.rol and current_user.rol.nombre_rol else ""
+    if rol_nombre == "GS":
+        if current_user.id_sucursal is not None:
+            query = query.filter(
+                or_(
+                    Proveedor.sucursal_id == current_user.id_sucursal,
+                    Proveedor.sucursal_id.is_(None),
+                )
+            )
+    elif sucursal_id is not None:
+        query = query.filter(Proveedor.sucursal_id == sucursal_id)
 
     # Filtro de búsqueda: razón social, NIT/RUT o contacto operativo
     if q:
@@ -140,17 +149,27 @@ def listar_proveedores(
         total=total,
         page=page,
         limit=limit,
-        pages=(total + limit - 1) // limit,  # techo de división
+        pages=(total + limit - 1) // limit,
     )
 
 
 @router.post("", response_model=None, status_code=status.HTTP_201_CREATED)
 @router.post("/", response_model=None, status_code=status.HTTP_201_CREATED)
-def crear_proveedor(proveedor_in: ProveedorCreate, db: Session = Depends(get_db)):
+def crear_proveedor(
+    proveedor_in: ProveedorCreate,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
     """CU23: Registra un proveedor validando campos obligatorios."""
     _validar_estado(proveedor_in.estado)
     _validar_nit_unico(db, proveedor_in.nit_rut)
-    _validar_sucursal(db, proveedor_in.sucursal_id)
+
+    rol_nombre = current_user.rol.nombre_rol.upper() if current_user.rol and current_user.rol.nombre_rol else ""
+    sucursal_id_asignar = proveedor_in.sucursal_id
+    if rol_nombre == "GS" and current_user.id_sucursal is not None:
+        sucursal_id_asignar = current_user.id_sucursal
+
+    _validar_sucursal(db, sucursal_id_asignar)
 
     proveedor = Proveedor(
         nombre=proveedor_in.nombre,
@@ -161,7 +180,7 @@ def crear_proveedor(proveedor_in: ProveedorCreate, db: Session = Depends(get_db)
         categoria=proveedor_in.categoria,
         estado=proveedor_in.estado,
         direccion=proveedor_in.direccion,
-        sucursal_id=proveedor_in.sucursal_id,
+        sucursal_id=sucursal_id_asignar,
     )
     db.add(proveedor)
     db.commit()
@@ -172,10 +191,21 @@ def crear_proveedor(proveedor_in: ProveedorCreate, db: Session = Depends(get_db)
 
 @router.put("/{id_proveedor}", response_model=None)
 def actualizar_proveedor(
-    id_proveedor: int, proveedor_in: ProveedorUpdate, db: Session = Depends(get_db)
+    id_proveedor: int,
+    proveedor_in: ProveedorUpdate,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
 ):
     """CU23: Actualiza datos de contacto, razón social o estado."""
     proveedor = _buscar_proveedor(db, id_proveedor)
+    rol_nombre = current_user.rol.nombre_rol.upper() if current_user.rol and current_user.rol.nombre_rol else ""
+    if rol_nombre == "GS" and current_user.id_sucursal is not None:
+        if proveedor.sucursal_id is not None and proveedor.sucursal_id != current_user.id_sucursal:
+            raise HTTPException(
+                status_code=403,
+                detail="No tiene permiso para editar proveedores de otra sucursal.",
+            )
+
     _validar_estado(proveedor_in.estado)
 
     if proveedor_in.nit_rut is not None and proveedor_in.nit_rut != proveedor.nit_rut:
@@ -198,14 +228,20 @@ def actualizar_proveedor(
 
 
 @router.delete("/{id_proveedor}", response_model=None)
-def eliminar_proveedor(id_proveedor: int, db: Session = Depends(get_db)):
-    """CU23: Elimina o desactiva con RESTRICCIÓN DE NEGOCIO.
-
-    Si el proveedor tiene productos asociados en el catálogo, se IMPIDE la
-    eliminación física (409) notificando el error y sugiriendo cambiar su
-    estado a 'Inactivo'. Sin productos asociados, se elimina físicamente.
-    """
+def eliminar_proveedor(
+    id_proveedor: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """CU23: Elimina o desactiva con RESTRICCIÓN DE NEGOCIO."""
     proveedor = _buscar_proveedor(db, id_proveedor)
+    rol_nombre = current_user.rol.nombre_rol.upper() if current_user.rol and current_user.rol.nombre_rol else ""
+    if rol_nombre == "GS" and current_user.id_sucursal is not None:
+        if proveedor.sucursal_id is not None and proveedor.sucursal_id != current_user.id_sucursal:
+            raise HTTPException(
+                status_code=403,
+                detail="No tiene permiso para eliminar proveedores de otra sucursal.",
+            )
 
     productos = _productos_asociados(db, proveedor)
     if productos > 0:

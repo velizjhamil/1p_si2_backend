@@ -304,7 +304,10 @@ def listar_envios(
 
     if estado:
         query = query.filter(Envio.estado == estado)
-    if codigo_sucursal:
+    if rol == "GS" and usuario.id_sucursal:
+        suc_filtro = codigo_sucursal or usuario.id_sucursal
+        query = query.filter(Envio.codigo_sucursal == suc_filtro)
+    elif codigo_sucursal:
         query = query.filter(Envio.codigo_sucursal == codigo_sucursal)
     if id_repartidor:
         query = query.filter(Envio.id_repartidor == id_repartidor)
@@ -385,7 +388,12 @@ def crear_envio_para_venta(
             status_code=409, detail=f"La venta {venta.codigo} ya tiene un envio."
         )
 
-    envio = Envio(id_venta=venta.id_venta, estado="PREPARANDO", intentos_fallidos=0)
+    envio = Envio(
+        id_venta=venta.id_venta,
+        codigo_sucursal=venta.id_sucursal,
+        estado="PREPARANDO",
+        intentos_fallidos=0,
+    )
     envio.historial.append(
         EnvioHistorial(
             estado_anterior=None,

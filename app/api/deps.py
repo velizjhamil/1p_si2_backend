@@ -71,7 +71,6 @@ def get_current_user(
     return usuario
 
 
-<<<<<<< Updated upstream
 def require_roles(*roles: str, detail: str | None = None):
     """Dependencia de autorización por rol (RBAC): solo pasan los roles indicados.
 
@@ -93,7 +92,6 @@ def require_roles(*roles: str, detail: str | None = None):
         return usuario
 
     return _dependencia
-=======
 def get_optional_user(
     credenciales: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
@@ -120,4 +118,3 @@ def get_optional_user(
         return None
     return usuario
 
->>>>>>> Stashed changes

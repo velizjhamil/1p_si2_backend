@@ -23,6 +23,7 @@ class UsuarioCreate(BaseModel):
     password: str = Field(min_length=6)
     nombre_rol: str  # Nombre del rol: ASU, GS, V, C o D (create-by-rol-name)
     estado: bool = True
+    id_sucursal: int | None = None
 
 
 # Actualización parcial (Step 2, PATCH/PUT): None = "no cambiar".
@@ -34,6 +35,7 @@ class UsuarioUpdate(BaseModel):
     password: str | None = None  # hash con obtener_hash_password() al persistir
     rol_id: UUID | None = None  # update-by-rol_id (difiere de create, que usa nombre_rol)
     estado: bool | None = None
+    id_sucursal: int | None = None
 
 
 # Fila liviana para tablas/grillas del frontend (Step 2: GET /api/v1/usuarios).
@@ -48,6 +50,8 @@ class UsuarioList(BaseModel):
     correo: EmailStr
     estado: bool
     rol: RolResponse
+    id_sucursal: int | None = None
+    sucursal_nombre: str | None = None
     fecha_creacion: datetime | None = None
     ultima_conexion: datetime | None = None
 
@@ -68,7 +72,10 @@ class UsuarioResponse(BaseModel):
     # El ORM expone la FK como `id_rol`; el alias de validación mapea ambos
     # mundos y el JSON final emite la clave "rol_id".
     rol_id: UUID = Field(validation_alias="id_rol")
+    id_sucursal: int | None = None
+    sucursal_nombre: str | None = None
     # fecha_creacion existe en la tabla usuarios desde la migración step1
     # (server_default now(), backfill automático de las filas existentes)
     fecha_creacion: datetime | None = None
     ultima_conexion: datetime | None = None
+

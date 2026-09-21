@@ -41,8 +41,15 @@ class ColorResumen(BaseModel):
     codigo_hex: Optional[str] = None
 
 
+class StockSucursalResumen(BaseModel):
+    """Disponibilidad física por tienda de una prenda recomendada."""
+
+    sucursal: str
+    stock: int
+
+
 class ProductoResumenIA(BaseModel):
-    """Detalle compacto de una prenda recomendada para tarjetas móviles interactivas."""
+    """Detalle compacto de una prenda recomendada para tarjetas visuales interactivas."""
 
     id_producto: int
     nombre: str
@@ -53,6 +60,8 @@ class ProductoResumenIA(BaseModel):
     tallas: List[str] = []
     colores: List[ColorResumen] = []
     stock_total: int = 0
+    temporada: Optional[str] = None
+    stock_sucursales: List[StockSucursalResumen] = []
 
 
 class ChatResponseData(BaseModel):

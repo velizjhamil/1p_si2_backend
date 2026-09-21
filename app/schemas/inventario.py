@@ -18,12 +18,14 @@ class MovimientoCreatePayload(BaseModel):
     - id_producto: se valida existencia en el router (422 si no existe).
     - tipo: validado aquí (422 automático si no es ENTRADA/SALIDA/AJUSTE).
     - id_usuario: NO viene en el payload — se toma del token de la sesión.
+    - id_sucursal: opcional en el payload; si es GS, se toma de su token.
     """
 
     id_producto: int = Field(gt=0)
     tipo: str
     cantidad: int = Field(ge=0)
     motivo: str | None = Field(default=None, max_length=255)
+    id_sucursal: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validar_tipo_y_cantidad(self) -> "MovimientoCreatePayload":
@@ -74,6 +76,8 @@ class MovimientoResponse(BaseModel):
     stock_nuevo: int
     motivo: str | None = None
     fecha_movimiento: datetime
+    id_sucursal: int | None = None
+    sucursal_nombre: str | None = None
     producto: ProductoMovimientoDetalle
     usuario: UsuarioMovimientoDetalle
 
@@ -90,6 +94,8 @@ class StockProductoResponse(BaseModel):
     stock_total: int
     umbral_minimo: int
     nivel: str  # 'CRITICO' | 'BAJO' | 'OK'
+    id_sucursal: int | None = None
+    sucursal_nombre: str | None = None
 
 
 class StockAlertResponse(BaseModel):

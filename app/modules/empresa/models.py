@@ -1,12 +1,17 @@
 # backend/app/modules/empresa/models.py
 # Paquete "Gestión Empresa" — CU16 Empresa, CU17 Sucursales, catálogo Ciudades
 from datetime import datetime
-from typing import List
+from typing import List, TYPE_CHECKING
+from uuid import UUID
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.modules.usuarios.models import Usuario
 
 
 class Empresa(Base):
@@ -97,6 +102,14 @@ class Sucursal(Base):
     horario_atencion: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # estado Activo/Inactivo (CU17) mapeado como booleano is_active
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # FK a Usuario (Gerente de Sucursal titular 1 a 1 exclusivo):
+    id_gerente: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("usuarios.id_usuario", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
     fecha_creacion: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -107,6 +120,12 @@ class Sucursal(Base):
     # Relaciones
     empresa: Mapped["Empresa"] = relationship(back_populates="sucursales", lazy="joined")
     ciudad: Mapped["Ciudad"] = relationship(back_populates="sucursales", lazy="joined")
+    gerente: Mapped["Usuario | None"] = relationship(
+        "Usuario", foreign_keys=[id_gerente], lazy="joined"
+    )
+    personal: Mapped[List["Usuario"]] = relationship(
+        "Usuario", foreign_keys="Usuario.id_sucursal", back_populates="sucursal", lazy="selectin"
+    )
 
     def __repr__(self) -> str:
         return f"<Sucursal(codigo_sucursal={self.codigo_sucursal}, nombre={self.nombre!r})>"

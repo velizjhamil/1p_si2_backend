@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, get_optional_user
 from app.core.config import get_settings
+from app.modules.usuarios.models import Usuario
 from app.schemas.ia import ChatRequest, ChatResponse
 from app.services.ia_service import IAService
 
@@ -40,14 +41,26 @@ def _envelope(data: Any, message: str = "Operación exitosa", **extra) -> Dict[s
 def chat_asistente(
     request: ChatRequest,
     db: Session = Depends(get_db),
+    usuario_actual: Usuario | None = Depends(get_optional_user),
 ) -> Dict[str, Any]:
     """Procesa el mensaje del usuario y devuelve la respuesta del asistente."""
+    # Control de acceso: Si hay sesión activa y no es Cliente (C) ni Administrador, denegar
+    if usuario_actual and usuario_actual.rol and usuario_actual.rol.nombre_rol not in ("C", "ADMIN", "ASU"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El asistente virtual de compras está reservado exclusivamente para clientes.",
+        )
+
     try:
-        resultado = IAService.generar_respuesta_chat(db, request)
+        resultado = IAService.generar_respuesta_chat(
+            db, request, usuario_actual=usuario_actual
+        )
         return _envelope(
             data=resultado.model_dump(),
             message="Respuesta generada exitosamente",
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception(f"Error no controlado en endpoint /ia/chat: {exc}")
         raise HTTPException(

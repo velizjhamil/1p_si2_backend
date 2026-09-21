@@ -17,13 +17,23 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.config import get_settings
 from app.modules.descuentos.models import Descuento
 from app.modules.empresa.models import Sucursal
-from app.modules.inventario.models import Categoria, Color, Producto, Talla
+from app.modules.inventario.models import (
+    Categoria,
+    Coleccion,
+    Color,
+    InventarioSucursal,
+    Producto,
+    Talla,
+    Temporada,
+)
+from app.modules.usuarios.models import Usuario
 from app.schemas.ia import (
     ChatMessage,
     ChatRequest,
     ChatResponseData,
     ColorResumen,
     ProductoResumenIA,
+    StockSucursalResumen,
 )
 
 logger = logging.getLogger("attention.ia_service")
@@ -57,6 +67,8 @@ class IAService:
         id_sucursal: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Extrae datos reales y relevantes de la base de datos para grounding."""
+        hoy = date.today()
+
         # 1. Categorías activas
         categorias = (
             db.query(Categoria)
@@ -86,7 +98,6 @@ class IAService:
         ]
 
         # 3. Promociones y Descuentos vigentes (CU12)
-        hoy = date.today()
         promos = (
             db.query(Descuento)
             .filter(
@@ -111,8 +122,20 @@ class IAService:
                 f"- {p.nombre}: {beneficio} ({cupon}){minimo}. {p.descripcion or ''}"
             )
 
+        # 3b. Temporadas y Colecciones vigentes (CU24)
+        temporadas = (
+            db.query(Temporada)
+            .options(joinedload(Temporada.coleccion))
+            .filter(Temporada.fecha_fin >= hoy)
+            .order_by(Temporada.fecha_inicio.desc())
+            .all()
+        )
+        temporadas_info = [
+            f"- Temporada '{t.nombre_temporada}' (Colección: {t.coleccion.nombre_coleccion if t.coleccion else 'General'}) vigente del {t.fecha_inicio} al {t.fecha_fin}"
+            for t in temporadas
+        ]
+
         # 4. Búsqueda de Productos Relevantes en Catálogo (CU6, CU7)
-        # Extraemos palabras clave significativas de la consulta del usuario
         palabras = [
             p.lower()
             for p in re.findall(r"\b[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}\b", consulta)
@@ -126,6 +149,7 @@ class IAService:
                 joinedload(Producto.categoria),
                 joinedload(Producto.tallas),
                 joinedload(Producto.colores),
+                joinedload(Producto.inventarios).joinedload(InventarioSucursal.sucursal),
             )
             .filter(Producto.estado == "Activo")
         )
@@ -156,49 +180,72 @@ class IAService:
             tallas_str = ", ".join([t.nombre_talla for t in p.tallas]) or "Estándar"
             colores_str = ", ".join([c.nombre_color for c in p.colores]) or "Único"
             cat_str = p.categoria.nombre if p.categoria else "General"
+
+            # Detalle de stock por sucursal física
+            stock_por_suc = [
+                f"{inv.sucursal.nombre}: {inv.stock} u."
+                for inv in (p.inventarios or [])
+                if inv.sucursal and inv.stock > 0
+            ]
+            stock_detallado = ", ".join(stock_por_suc) if stock_por_suc else "Stock disponible online"
+
             productos_info.append(
-                f"- [ID:{p.id_producto}] '{p.nombre}' | Cat: {cat_str} | Precio: Bs {float(p.precio_venta):.2f} | Tallas: {tallas_str} | Colores: {colores_str} | Stock: {p.stock_total} | Desc: {p.descripcion or ''}"
+                f"- [ID:{p.id_producto}] '{p.nombre}' | Cat: {cat_str} | Precio: Bs {float(p.precio_venta):.2f} | Tallas: {tallas_str} | Colores: {colores_str} | Stock Total: {p.stock_total} ({stock_detallado}) | Desc: {p.descripcion or ''}"
             )
 
         return {
             "categorias": categorias_info,
             "sucursales": sucursales_info,
             "promociones": promos_info,
+            "temporadas": temporadas_info,
             "productos": productos_info,
             "productos_candidatos": productos_totales,
         }
 
     @classmethod
-    def _construir_system_instruction(cls, contexto: Dict[str, Any]) -> str:
+    def _construir_system_instruction(
+        cls, contexto: Dict[str, Any], nombre_cliente: Optional[str] = None
+    ) -> str:
         """Construye el prompt de sistema para el rol de asesora de moda Attention."""
         categorias_txt = "\n".join(contexto["categorias"]) or "No registradas"
         sucursales_txt = "\n".join(contexto["sucursales"]) or "No registradas"
         promos_txt = "\n".join(contexto["promociones"]) or "Sin promociones activas"
+        temporadas_txt = "\n".join(contexto.get("temporadas", [])) or "Sin temporadas específicas"
         productos_txt = "\n".join(contexto["productos"]) or "Sin prendas disponibles"
+
+        saludo_cliente = (
+            f"Estás atendiendo personalmente a {nombre_cliente}. Dirígete al cliente de forma cálida por su nombre."
+            if nombre_cliente
+            else "Atiende al cliente con calidez y amabilidad."
+        )
 
         return f"""
 Eres "Attention AI", la asesora virtual experta en moda, tendencias y atención al cliente de la prestigiosa tienda de ropa Attention (Bolivia).
 
 OBJETIVO:
-Asesorar de forma cálida, profesional y persuasiva a los clientes respondiendo preguntas sobre prendas, tallas, colores, precios (en Bolivianos 'Bs'), promociones vigentes, probador virtual y sucursales físicas.
+Asesorar de forma cálida, profesional y persuasiva a los clientes respondiendo preguntas sobre prendas, tallas, colores, precios (en Bolivianos 'Bs'), promociones vigentes, temporadas/colecciones, probador virtual y disponibilidad física en sucursales.
+{saludo_cliente}
 
 DIRECTIVAS ESTRICTAS DE RESPUESTA:
 1. INFORMACIÓN FIDEDIGNA: Solo recomienda prendas que figuren en la sección [CATÁLOGO DE PRENDAS DISPONIBLES]. NUNCA inventes productos, precios ni tallas que no existan en la lista.
 2. CITACIÓN DE PRODUCTOS: Cada vez que recomiendes una prenda en tu texto, debes incluir su ID numérico en la lista "productos_recomendados".
-3. INFORMACIÓN CORPORATIVA: Si preguntan por horarios, direcciones o teléfonos, utiliza con precisión la sección [SUCURSALES FÍSICAS].
-4. OFERTAS: Si preguntan por descuentos o hay promociones aplicables, informa los códigos o beneficios de [PROMOCIONES ACTIVAS].
+3. INFORMACIÓN CORPORATIVA Y SUCURSALES: Si preguntan por horarios, direcciones o disponibilidad en tiendas físicas, utiliza con precisión la sección [SUCURSALES FÍSICAS] y el stock por sucursal indicado en cada producto.
+4. OFERTAS Y TEMPORADAS: Si preguntan por descuentos o colecciones, informa los beneficios de [PROMOCIONES ACTIVAS] y las tendencias de [TEMPORADAS Y COLECCIONES ACTIVAS].
 5. TONO: Amigable, elegante, conciso y en español neutro latinoamericano. Puedes usar formato Markdown (negrita, viñetas).
 6. FORMATO DE SALIDA ESTRICTO: Tu respuesta DEBE SER UN OBJETO JSON VÁLIDO con la siguiente estructura exacta:
 {{
   "respuesta": "Texto en Markdown para el cliente con la explicación y asesoría.",
   "productos_recomendados": [1, 2],
-  "sugerencias": ["¿En qué colores viene la primera prenda?", "¿Tienen probador virtual?", "¿Cuál es el horario de la sucursal central?"]
+  "sugerencias": ["¿En qué colores viene la primera prenda?", "¿Tienen probador virtual?", "¿En qué sucursal la encuentro?"]
 }}
 
 === DATOS EN TIEMPO REAL DE LA TIENDA ATTENTION ===
 
 [CATEGORÍAS DE PRENDAS]
 {categorias_txt}
+
+[TEMPORADAS Y COLECCIONES ACTIVAS]
+{temporadas_txt}
 
 [SUCURSALES FÍSICAS]
 {sucursales_txt}
@@ -214,7 +261,7 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
     def _enriquecer_productos(
         cls, db: Session, product_ids: List[int]
     ) -> List[ProductoResumenIA]:
-        """Carga el detalle visual completo de los productos recomendados para las tarjetas móviles."""
+        """Carga el detalle visual completo de los productos recomendados para las tarjetas interactivas."""
         if not product_ids:
             return []
 
@@ -233,6 +280,7 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
                 joinedload(Producto.categoria),
                 joinedload(Producto.tallas),
                 joinedload(Producto.colores),
+                joinedload(Producto.inventarios).joinedload(InventarioSucursal.sucursal),
             )
             .filter(Producto.id_producto.in_(ids_unicos))
             .all()
@@ -252,6 +300,12 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
             ]
             tallas_str = [t.nombre_talla for t in p.tallas]
 
+            stock_sucursales = [
+                StockSucursalResumen(sucursal=inv.sucursal.nombre, stock=inv.stock)
+                for inv in (p.inventarios or [])
+                if inv.sucursal and inv.stock > 0
+            ]
+
             resumenes.append(
                 ProductoResumenIA(
                     id_producto=p.id_producto,
@@ -263,6 +317,8 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
                     tallas=tallas_str,
                     colores=colores_res,
                     stock_total=p.stock_total,
+                    temporada=None,
+                    stock_sucursales=stock_sucursales,
                 )
             )
 
@@ -275,14 +331,16 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
         consulta: str,
         contexto: Dict[str, Any],
         motivo: str = "",
+        nombre_cliente: Optional[str] = None,
     ) -> ChatResponseData:
         """Genera una respuesta inteligente de degradación elegante basada directamente en la BD."""
         candidatos = contexto.get("productos_candidatos", [])
         ids = [p.id_producto for p in candidatos[:3]]
         detalles = cls._enriquecer_productos(db, ids)
 
+        saludo = f"¡Hola {nombre_cliente}!" if nombre_cliente else "¡Hola!"
         lineas = [
-            "¡Hola! He consultado nuestro catálogo en tiempo real para encontrar las mejores opciones disponibles para ti:\n"
+            f"{saludo} He consultado nuestro catálogo en tiempo real para encontrar las mejores opciones disponibles para ti:\n"
         ]
         for prod in detalles:
             tallas_txt = ", ".join(prod.tallas) if prod.tallas else "Talla estándar"
@@ -310,8 +368,11 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
         cls,
         db: Session,
         request: ChatRequest,
+        usuario_actual: Optional[Usuario] = None,
     ) -> ChatResponseData:
         """Punto de entrada principal: procesa consulta, realiza RAG y llama a Gemini."""
+        nombre_cliente = usuario_actual.nombre if usuario_actual else None
+
         # 1. Recuperar contexto de la base de datos
         contexto = cls._recuperar_contexto_db(
             db, request.mensaje, request.id_sucursal
@@ -325,9 +386,12 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
                 request.mensaje,
                 contexto,
                 motivo="Cliente Gemini no disponible",
+                nombre_cliente=nombre_cliente,
             )
 
-        system_instruction = cls._construir_system_instruction(contexto)
+        system_instruction = cls._construir_system_instruction(
+            contexto, nombre_cliente=nombre_cliente
+        )
         settings = get_settings()
 
         # Modelos en orden de preferencia

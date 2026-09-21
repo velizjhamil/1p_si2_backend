@@ -1,6 +1,7 @@
 # backend/app/schemas/sucursal.py
 # Esquemas Pydantic para CU17 — Gestión de Sucursales (+ catálogo Ciudades).
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,12 +16,23 @@ class CiudadRead(BaseModel):
     departamento: str | None = None
 
 
+class GerenteResumen(BaseModel):
+    """Datos básicos del gerente titular de la sucursal."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id_usuario: UUID
+    nombre: str
+    apellido: str | None = None
+    correo: str
+    estado: bool = True
+
+
 class SucursalRead(BaseModel):
     """Sucursal con su ciudad asociada (GET /api/v1/sucursales y mutaciones).
 
-    `ciudad` llega anidada gracias a la relationship lazy="joined" del modelo;
-    `total_personal` cuenta usuarios GS/V asignados a la sucursal (0 mientras
-    no exista la FK física usuarios.id_sucursal — CU futuros).
+    `ciudad` y `gerente` llegan anidados; `total_personal` cuenta usuarios GS/V
+    asignados a la sucursal.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -34,6 +46,9 @@ class SucursalRead(BaseModel):
     is_active: bool
     ciudad: CiudadRead
     empresa_id: int
+    id_gerente: UUID | None = None
+    gerente: GerenteResumen | None = None
+    total_personal: int = 0
     fecha_actualizacion: datetime | None = None
 
 
@@ -45,6 +60,7 @@ class SucursalCreate(BaseModel):
     direccion: str | None = Field(default=None, max_length=255)
     telefono: str | None = Field(default=None, max_length=30)
     horario_atencion: str | None = Field(default=None, max_length=100)
+    id_gerente: UUID | None = None
 
 
 class SucursalUpdate(BaseModel):
@@ -58,3 +74,5 @@ class SucursalUpdate(BaseModel):
     direccion: str | None = Field(default=None, max_length=255)
     telefono: str | None = Field(default=None, max_length=30)
     horario_atencion: str | None = Field(default=None, max_length=100)
+    id_gerente: UUID | None = None
+

@@ -75,6 +75,7 @@ class CheckoutPayload(BaseModel):
     # Opcional: si no viaja, ONLINE => DOMICILIO y POS => RETIRO (el
     # frontend actual no lo envía y sigue funcionando igual).
     tipo_entrega: Literal["DOMICILIO", "RETIRO"] | None = None
+    id_sucursal: int | None = None
 
     @model_validator(mode="after")
     def _validar_metodo(self) -> "CheckoutPayload":
@@ -136,3 +137,41 @@ class VentaResponse(BaseModel):
     tipo_venta: Literal["ONLINE", "POS"] = "ONLINE"
     # CU18 — DOMICILIO (genera envío) | RETIRO (entrega en tienda).
     tipo_entrega: Literal["DOMICILIO", "RETIRO"] = "DOMICILIO"
+    id_sucursal: int | None = None
+    sucursal_nombre: str | None = None
+
+
+class CobroEfectivoPayload(BaseModel):
+    """Payload para registrar el cobro en efectivo en mostrador (CU21).
+    
+    Permite liquidar:
+    - Una reserva existente (id_reserva)
+    - Una venta en estado PENDIENTE (id_venta)
+    """
+    id_reserva: int | None = Field(default=None, description="ID de la reserva a liquidar")
+    id_venta: int | None = Field(default=None, description="ID de la venta a liquidar")
+    monto_recibido: float | None = Field(default=None, ge=0, description="Monto entregado en efectivo por el cliente")
+
+    @model_validator(mode="after")
+    def _validar_referencia(self) -> "CobroEfectivoPayload":
+        if not self.id_reserva and not self.id_venta:
+            raise ValueError("Debe especificar al menos 'id_reserva' o 'id_venta' para liquidar el cobro.")
+        if self.id_reserva and self.id_venta:
+            raise ValueError("Especifique solo 'id_reserva' o 'id_venta', no ambos simultáneamente.")
+        return self
+
+
+class ComprobanteCobroEfectivoResponse(BaseModel):
+    """Comprobante generado tras el cobro exitoso en efectivo en sucursal."""
+    model_config = ConfigDict(from_attributes=True)
+
+    venta: VentaResponse
+    reserva_liquidada_id: int | None = None
+    monto_total: float
+    monto_recibido: float
+    cambio_devuelto: float
+    fecha_cobro: datetime
+    codigo_comprobante: str
+    vendedor_nombre: str
+    sucursal_nombre: str
+

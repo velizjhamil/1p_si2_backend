@@ -38,11 +38,24 @@ class ColorDetalle(BaseModel):
     codigo_hex: str
 
 
+class DisponibilidadSucursalResponse(BaseModel):
+    """Disponibilidad física de stock de la prenda por sucursal."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id_sucursal: int
+    nombre_sucursal: str
+    ciudad: str | None = None
+    stock: int
+    disponible: bool = True
+
+
 class ProductoResponse(BaseModel):
     """Respuesta de GET/POST/PUT /api/v1/productos.
 
     Incluye el detalle de la categoría y los arrays de tallas y colores
-    asociados (resueltos desde las tablas pivote N:M).
+    asociados (resueltos desde las tablas pivote N:M), y la disponibilidad
+    por sucursal física.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -60,6 +73,7 @@ class ProductoResponse(BaseModel):
     estado: str
     tallas: list[TallaDetalle] = Field(default_factory=list)
     colores: list[ColorDetalle] = Field(default_factory=list)
+    disponibilidad_sucursales: list[DisponibilidadSucursalResponse] = Field(default_factory=list)
     fecha_creacion: datetime | None = None
 
 

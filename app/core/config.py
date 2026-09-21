@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
+    # --- Pasarela de Pagos (CU15+CU21) ---
+    PAYMENT_GATEWAY_SECRET: str = "attention_gateway_secret_2026_x89a"
+    PAYMENT_GATEWAY_NAME: str = "AttentionPay"
+    # Claves de Stripe cargadas exclusivamente desde .env o variables de entorno
+    STRIPE_SECRET_KEY: str | None = None
+    STRIPE_PUBLISHABLE_KEY: str | None = None
+
     # --- CORS (app/main.py) ---
     # Soporta dos formatos:
     # 1. JSON array: CORS_ORIGINS='["https://app.vercel.app","http://localhost:4200"]'

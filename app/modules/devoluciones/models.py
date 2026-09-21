@@ -107,12 +107,20 @@ class Devolucion(Base):
     monto_total_devuelto: Mapped[float] = mapped_column(
         Numeric(10, 2), nullable=False, default=0
     )
+    # Sucursal de procesamiento (CU17 multi-sucursal)
+    id_sucursal: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("sucursales.codigo_sucursal", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Relaciones
     venta: Mapped["Venta"] = relationship(lazy="joined")  # noqa: F821
     cliente: Mapped["Usuario"] = relationship(  # noqa: F821
         "Usuario", foreign_keys="Devolucion.id_cliente", lazy="joined"
     )
+    sucursal: Mapped["Sucursal | None"] = relationship(lazy="joined")  # noqa: F821
     solicitante: Mapped["Usuario"] = relationship(  # noqa: F821
         "Usuario", foreign_keys="Devolucion.id_solicitante", lazy="joined"
     )

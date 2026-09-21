@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_roles
 from app.modules.compras.models import Proveedor
-from app.modules.inventario.models import Categoria, Color, Producto, Talla
+from app.modules.inventario.models import Categoria, Color, InventarioSucursal, Producto, Talla
 from app.schemas.producto import (
     ESTADOS_PRODUCTO,
     ProductoCreatePayload,
@@ -70,6 +70,16 @@ def _serializar_producto(p: Producto) -> dict:
             {"id_color": c.id_color, "nombre_color": c.nombre_color, "codigo_hex": c.codigo_hex}
             for c in p.colores
         ],
+        "disponibilidad_sucursales": [
+            {
+                "id_sucursal": inv.id_sucursal,
+                "nombre_sucursal": inv.sucursal.nombre if inv.sucursal else f"Sucursal {inv.id_sucursal}",
+                "ciudad": inv.sucursal.ciudad.nombre if (inv.sucursal and inv.sucursal.ciudad) else None,
+                "stock": inv.stock,
+                "disponible": inv.stock > 0,
+            }
+            for inv in (p.inventarios or [])
+        ],
         "fecha_creacion": p.fecha_creacion,
     }
 
@@ -87,7 +97,7 @@ def _buscar_producto(db: Session, id_producto: int) -> Producto:
 
 def _validar_estado(valor: str | None) -> None:
     """422 si el estado no es Activo/Inactivo/Agotado."""
-    if valor is not None and valor not in ESTADOS_PRODUCTO:
+    if isinstance(valor, str) and valor not in ESTADOS_PRODUCTO:
         raise HTTPException(
             status_code=422,
             detail=f"Estado inválido '{valor}'. Valores permitidos: {', '.join(ESTADOS_PRODUCTO)}.",
@@ -169,11 +179,28 @@ def listar_productos(
     db: Session = Depends(get_db),
     q: str | None = Query(default=None, description="Busca por nombre o descripción"),
     id_categoria: int | None = Query(default=None, ge=1, description="FK categoría del CU9"),
+    id_sucursal: int | None = Query(default=None, ge=1, description="Filtrar prendas con stock en esta sucursal"),
+    solo_disponibles: bool = Query(default=False, description="true => solo con stock disponible"),
     estado: str | None = Query(default=None, description="Activo | Inactivo | Agotado"),
     page: int = Query(default=1, ge=1, description="Página (base 1)"),
     limit: int = Query(default=10, ge=1, le=100, description="Registros por página"),
 ):
-    """CU6: Lista paginada con búsqueda, filtro por categoría y estado."""
+    """CU6: Lista paginada con búsqueda, filtro por categoría, sucursal y estado."""
+    if not isinstance(q, str):
+        q = None
+    if not isinstance(id_categoria, int):
+        id_categoria = None
+    if not isinstance(id_sucursal, int):
+        id_sucursal = None
+    if not isinstance(solo_disponibles, bool):
+        solo_disponibles = False
+    if not isinstance(estado, str):
+        estado = None
+    if not isinstance(page, int):
+        page = 1
+    if not isinstance(limit, int):
+        limit = 10
+
     _validar_estado(estado)
 
     query = db.query(Producto)
@@ -189,6 +216,14 @@ def listar_productos(
     if id_categoria:
         _validar_fk(db, id_categoria)
         query = query.filter(Producto.id_categoria == id_categoria)
+    if id_sucursal:
+        query = query.join(Producto.inventarios).filter(
+            InventarioSucursal.id_sucursal == id_sucursal
+        )
+        if solo_disponibles:
+            query = query.filter(InventarioSucursal.stock > 0)
+    elif solo_disponibles:
+        query = query.filter(Producto.stock_total > 0)
     if estado:
         query = query.filter(Producto.estado == estado)
 

@@ -11,11 +11,12 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
-from app.modules.inventario.models import MovimientoInventario, Producto
+from app.modules.inventario.models import InventarioSucursal, MovimientoInventario, Producto
+from app.modules.inventario.stock_alert import verificar_y_notificar_stock_critico
 from app.modules.usuarios.models import Usuario
 from app.schemas.inventario import (
     MovimientoCreatePayload,
@@ -50,7 +51,12 @@ def _nivel_stock(stock: int) -> str:
     return "OK"
 
 
-def _serializar_stock(p: Producto, umbral: int = STOCK_CRITICO) -> dict:
+def _serializar_stock(
+    p: Producto,
+    umbral: int = STOCK_CRITICO,
+    sucursal_id: int | None = None,
+    sucursal_nombre: str | None = None,
+) -> dict:
     """Fila del GET /stock: producto + stock + nivel de alerta."""
     return {
         "id_producto": p.id_producto,
@@ -60,11 +66,32 @@ def _serializar_stock(p: Producto, umbral: int = STOCK_CRITICO) -> dict:
         "stock_total": p.stock_total,
         "umbral_minimo": umbral,
         "nivel": _nivel_stock(p.stock_total),
+        "id_sucursal": sucursal_id,
+        "sucursal_nombre": sucursal_nombre,
+    }
+
+
+def _serializar_stock_sucursal(
+    inv: InventarioSucursal,
+    umbral: int = STOCK_CRITICO,
+) -> dict:
+    """Fila del GET /stock para una sucursal específica (InventarioSucursal)."""
+    p = inv.producto
+    return {
+        "id_producto": p.id_producto,
+        "nombre": p.nombre,
+        "categoria": p.categoria.nombre if p.categoria else None,
+        "estado": p.estado,
+        "stock_total": inv.stock,
+        "umbral_minimo": inv.stock_minimo if inv.stock_minimo else umbral,
+        "nivel": _nivel_stock(inv.stock),
+        "id_sucursal": inv.id_sucursal,
+        "sucursal_nombre": inv.sucursal.nombre if inv.sucursal else None,
     }
 
 
 def _serializar_movimiento(m: MovimientoInventario) -> dict:
-    """Movimiento con producto y usuario embebidos (respuesta detallada)."""
+    """Movimiento con producto, usuario y sucursal embebidos (respuesta detallada)."""
     return {
         "id_movimiento": m.id_movimiento,
         "tipo": m.tipo,
@@ -73,6 +100,8 @@ def _serializar_movimiento(m: MovimientoInventario) -> dict:
         "stock_nuevo": m.stock_nuevo,
         "motivo": m.motivo,
         "fecha_movimiento": m.fecha_movimiento,
+        "id_sucursal": m.id_sucursal,
+        "sucursal_nombre": m.sucursal.nombre if m.sucursal else None,
         "producto": {
             "id_producto": m.producto.id_producto,
             "nombre": m.producto.nombre,
@@ -93,7 +122,7 @@ def _serializar_movimiento(m: MovimientoInventario) -> dict:
 
 def _validar_tipo_filtro(valor: str | None) -> None:
     """422 si el filtro de tipo no es un tipo válido."""
-    if valor is not None and valor not in TIPOS_MOVIMIENTO:
+    if isinstance(valor, str) and valor not in TIPOS_MOVIMIENTO:
         raise HTTPException(
             status_code=422,
             detail=f"Tipo inválido '{valor}'. Valores permitidos: {', '.join(TIPOS_MOVIMIENTO)}.",
@@ -107,6 +136,7 @@ def _validar_tipo_filtro(valor: str | None) -> None:
 def listar_stock(
     db: Session = Depends(get_db),
     _usuario: Usuario = Depends(get_current_user),
+    sucursal_id: int | None = Query(default=None, description="Filtrar por ID de sucursal"),
     q: str | None = Query(default=None, description="Busca por nombre del producto"),
     solo_alertas: bool = Query(
         default=False,
@@ -118,29 +148,71 @@ def listar_stock(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """CU22: Stock actual por producto con nivel de alerta (CRITICO/BAJO/OK).
+    if not isinstance(q, str):
+        q = None
+    if not isinstance(sucursal_id, int):
+        sucursal_id = None
+    if not isinstance(solo_alertas, bool):
+        solo_alertas = False
+    if not isinstance(umbral_minimo, int):
+        umbral_minimo = STOCK_CRITICO
+    if not isinstance(page, int):
+        page = 1
+    if not isinstance(limit, int):
+        limit = 20
 
-    - `solo_alertas=true` + `umbral_minimo` => StockAlertResponse (productos
-      con stock < umbral).
-    - `q` busca por nombre de producto.
-    """
-    query = db.query(Producto)
+    # RBAC e aislamiento multi-sucursal:
+    # - GS y V: aislamiento forzado a su sucursal asignada (403 si intentan consultar otra o no tienen asignación).
+    # - ASU: puede consultar global o filtrar por cualquier sucursal.
+    # - C / otros: consulta stock disponible (global o sucursal).
+    rol = _usuario.rol.nombre_rol.upper() if _usuario.rol and _usuario.rol.nombre_rol else ""
+    if rol in ("GS", "V"):
+        if not _usuario.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El personal operativo debe tener una sucursal asignada para consultar el stock local.",
+            )
+        if sucursal_id is not None and sucursal_id != _usuario.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"No tiene permisos para consultar el stock de otra sucursal. Su tienda asignada es {_usuario.id_sucursal}.",
+            )
+        sucursal_id = _usuario.id_sucursal
 
-    if q:
-        term = f"%{q}%"
-        query = query.filter(or_(Producto.nombre.ilike(term)))
-    if solo_alertas:
-        query = query.filter(Producto.stock_total < umbral_minimo)
+    if sucursal_id is not None:
+        query = (
+            db.query(InventarioSucursal)
+            .join(InventarioSucursal.producto)
+            .filter(InventarioSucursal.id_sucursal == sucursal_id)
+        )
+        if q:
+            query = query.filter(Producto.nombre.ilike(f"%{q}%"))
+        if solo_alertas:
+            query = query.filter(InventarioSucursal.stock < umbral_minimo)
 
-    total = query.count()
-    items = (
-        query.order_by(Producto.stock_total.asc(), Producto.id_producto)
-        .offset((page - 1) * limit)
-        .limit(limit)
-        .all()
-    )
+        total = query.count()
+        items = (
+            query.order_by(InventarioSucursal.stock.asc(), InventarioSucursal.id_producto)
+            .offset((page - 1) * limit)
+            .limit(limit)
+            .all()
+        )
+        data = [_serializar_stock_sucursal(inv, umbral_minimo) for inv in items]
+    else:
+        query = db.query(Producto)
+        if q:
+            query = query.filter(Producto.nombre.ilike(f"%{q}%"))
+        if solo_alertas:
+            query = query.filter(Producto.stock_total < umbral_minimo)
 
-    data = [_serializar_stock(p, umbral_minimo) for p in items]
+        total = query.count()
+        items = (
+            query.order_by(Producto.stock_total.asc(), Producto.id_producto)
+            .offset((page - 1) * limit)
+            .limit(limit)
+            .all()
+        )
+        data = [_serializar_stock(p, umbral_minimo) for p in items]
 
     return _envelope(
         data,
@@ -150,6 +222,7 @@ def listar_stock(
         pages=(total + limit - 1) // limit,
         umbral_minimo=umbral_minimo,
         alertas=sum(1 for d in data if d["nivel"] == "CRITICO"),
+        sucursal_id=sucursal_id,
     )
 
 
@@ -160,6 +233,7 @@ def listar_stock(
 def listar_movimientos(
     db: Session = Depends(get_db),
     _usuario: Usuario = Depends(get_current_user),
+    sucursal_id: int | None = Query(default=None, description="Filtrar por sucursal"),
     tipo: str | None = Query(
         default=None, description="ENTRADA | SALIDA | AJUSTE"
     ),
@@ -173,16 +247,51 @@ def listar_movimientos(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
 ):
-    """CU22: Historial de movimientos (kardex) con filtros.
+    if not isinstance(tipo, str):
+        tipo = None
+    if not isinstance(sucursal_id, int):
+        sucursal_id = None
+    if not isinstance(fecha, date):
+        fecha = None
+    if not isinstance(fecha_desde, date):
+        fecha_desde = None
+    if not isinstance(fecha_hasta, date):
+        fecha_hasta = None
+    if not isinstance(id_producto, int):
+        id_producto = None
+    if not isinstance(q, str):
+        q = None
+    if not isinstance(page, int):
+        page = 1
+    if not isinstance(limit, int):
+        limit = 20
 
-    - `tipo`: ENTRADA/SALIDA/AJUSTE (422 si es otro valor).
-    - `fecha`: filtro por fecha exacta; `fecha_desde`/`fecha_hasta`: rango.
-    - `id_producto`: kardex de UN producto.
-    """
     _validar_tipo_filtro(tipo)
+
+    rol = _usuario.rol.nombre_rol.upper() if _usuario.rol and _usuario.rol.nombre_rol else ""
+    if rol not in ("ASU", "GS", "V"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el personal administrativo y operativo puede consultar el historial de movimientos de inventario.",
+        )
+
+    if rol in ("GS", "V"):
+        if not _usuario.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El personal operativo debe tener una sucursal asignada para consultar el kardex.",
+            )
+        if sucursal_id is not None and sucursal_id != _usuario.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"No tiene permisos para consultar movimientos de otra sucursal. Su tienda asignada es {_usuario.id_sucursal}.",
+            )
+        sucursal_id = _usuario.id_sucursal
 
     query = db.query(MovimientoInventario)
 
+    if sucursal_id is not None:
+        query = query.filter(MovimientoInventario.id_sucursal == sucursal_id)
     if tipo:
         query = query.filter(MovimientoInventario.tipo == tipo)
     if fecha:
@@ -219,6 +328,7 @@ def listar_movimientos(
         page=page,
         limit=limit,
         pages=(total + limit - 1) // limit,
+        sucursal_id=sucursal_id,
     )
 
 
@@ -245,18 +355,30 @@ def registrar_movimiento(
     db: Session = Depends(get_db),
     usuario_actual: Usuario = Depends(get_current_user),
 ):
-    """CU22: Registra un movimiento de stock y actualiza productos.stock_total.
+    """CU22: Registra un movimiento de stock y actualiza inventario_sucursal y productos.stock_total."""
+    rol = usuario_actual.rol.nombre_rol.upper() if usuario_actual.rol and usuario_actual.rol.nombre_rol else ""
+    if rol not in ("ASU", "GS", "V"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene permisos para registrar movimientos de inventario.",
+        )
 
-    Semántica por tipo (alineada con el mock del frontend):
-    - ENTRADA: stock += cantidad (cantidad > 0).
-    - SALIDA: stock -= cantidad; 409 si no alcanza (stock nunca negativo).
-    - AJUSTE: stock = cantidad (fija el stock total; 0 permitido).
+    if rol in ("GS", "V"):
+        if not usuario_actual.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El personal operativo debe tener una sucursal asignada para gestionar inventario.",
+            )
+        if payload.id_sucursal is not None and payload.id_sucursal != usuario_actual.id_sucursal:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"No puede modificar el inventario de otra sucursal. Su tienda asignada es {usuario_actual.id_sucursal}.",
+            )
+        id_sucursal = usuario_actual.id_sucursal
+    else:
+        id_sucursal = payload.id_sucursal
 
-    Atomicidad: SELECT FOR UPDATE OF productos bloquea la fila del
-    producto hasta el COMMIT; kardex y productos se escriben juntos.
-    """
-    # Bloquear la fila del producto (concurrencia con reservas CU14 y
-    # otros movimientos CU22). of= obligatorio por los outer joins.
+    # Bloquear la fila del producto
     producto = (
         db.query(Producto)
         .filter(Producto.id_producto == payload.id_producto)
@@ -269,29 +391,89 @@ def registrar_movimiento(
             detail=f"No existe el producto con id {payload.id_producto}.",
         )
 
-    stock_anterior = producto.stock_total
     tipo = payload.tipo
     cantidad = payload.cantidad
 
-    # Calcular stock nuevo según semántica del tipo
-    if tipo == "ENTRADA":
-        stock_nuevo = stock_anterior + cantidad
-    elif tipo == "SALIDA":
-        if stock_anterior < cantidad:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Stock insuficiente para '{producto.nombre}': "
-                    f"disponible {stock_anterior}, salida solicitada {cantidad}."
-                ),
+    # Si hay sucursal asociada, gestionar InventarioSucursal
+    if id_sucursal:
+        inv_sucursal = (
+            db.query(InventarioSucursal)
+            .filter(
+                InventarioSucursal.id_sucursal == id_sucursal,
+                InventarioSucursal.id_producto == producto.id_producto,
             )
-        stock_nuevo = stock_anterior - cantidad
-    else:  # AJUSTE
-        stock_nuevo = cantidad
+            .with_for_update(of=InventarioSucursal)
+            .first()
+        )
+        if not inv_sucursal:
+            inv_sucursal = InventarioSucursal(
+                id_sucursal=id_sucursal,
+                id_producto=producto.id_producto,
+                stock=0,
+                stock_minimo=5,
+            )
+            db.add(inv_sucursal)
+            db.flush()
 
-    # Kardex: para ENTRADA/SALIDA la cantidad es lo movido; para AJUSTE
-    # guardamos el valor exacto y la delta se deriva de stock_anterior/
-    # stock_nuevo (mismo criterio del mock del frontend).
+        stock_anterior = inv_sucursal.stock
+
+        if tipo == "ENTRADA":
+            stock_nuevo = stock_anterior + cantidad
+        elif tipo == "SALIDA":
+            if stock_anterior < cantidad:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Stock insuficiente en la sucursal: disponible {stock_anterior}, "
+                        f"salida solicitada {cantidad}."
+                    ),
+                )
+            stock_nuevo = stock_anterior - cantidad
+        else:  # AJUSTE
+            stock_nuevo = cantidad
+
+        inv_sucursal.stock = stock_nuevo
+        db.flush()
+
+        # Alerta automática si el stock de la sucursal quedó en nivel crítico (<= 5)
+        if tipo in ("SALIDA", "AJUSTE"):
+            verificar_y_notificar_stock_critico(
+                db,
+                id_producto=producto.id_producto,
+                id_sucursal=id_sucursal,
+                stock_nuevo=stock_nuevo,
+                commit=False,
+            )
+
+        # Recalcular stock_total del producto sumando todas las sucursales
+        total_global = (
+            db.query(func.coalesce(func.sum(InventarioSucursal.stock), 0))
+            .filter(InventarioSucursal.id_producto == producto.id_producto)
+            .scalar()
+        )
+        producto.stock_total = total_global
+    else:
+        stock_anterior = producto.stock_total
+        if tipo == "ENTRADA":
+            stock_nuevo = stock_anterior + cantidad
+        elif tipo == "SALIDA":
+            if stock_anterior < cantidad:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Stock insuficiente para '{producto.nombre}': "
+                        f"disponible {stock_anterior}, salida solicitada {cantidad}."
+                    ),
+                )
+            stock_nuevo = stock_anterior - cantidad
+        else:  # AJUSTE
+            stock_nuevo = cantidad
+
+        producto.stock_total = stock_nuevo
+
+    if producto.estado == "Agotado" and producto.stock_total > 0:
+        producto.estado = "Activo"
+
     movimiento = MovimientoInventario(
         id_producto=producto.id_producto,
         tipo=tipo,
@@ -300,14 +482,9 @@ def registrar_movimiento(
         stock_nuevo=stock_nuevo,
         motivo=payload.motivo,
         id_usuario=usuario_actual.id_usuario,
+        id_sucursal=id_sucursal,
     )
     db.add(movimiento)
-
-    # Actualización atómica del stock en la misma transacción
-    producto.stock_total = stock_nuevo
-    if producto.estado == "Agotado" and stock_nuevo > 0:
-        producto.estado = "Activo"  # reingreso automático al reponer stock
-
     db.commit()
     db.refresh(movimiento)
 

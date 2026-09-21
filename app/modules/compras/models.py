@@ -57,5 +57,9 @@ class Proveedor(Base):
     # Relaciones
     sucursal: Mapped["Sucursal"] = relationship(lazy="joined")
 
+    @property
+    def sucursal_nombre(self) -> str | None:
+        return self.sucursal.nombre if self.sucursal else None
+
     def __repr__(self) -> str:
         return f"<Proveedor(id_proveedor={self.id_proveedor}, nombre={self.nombre!r}, nit_rut={self.nit_rut!r})>"

@@ -13,7 +13,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
-from app.modules.usuarios.models import Usuario
+from app.modules.usuarios.models import Rol, Usuario
 from app.modules.ventas.models import DetalleReserva, Reserva
 from app.schemas.reserva import (
     ESTADOS_RESERVA,
@@ -21,7 +21,9 @@ from app.schemas.reserva import (
     ReservaResponse,
     ReservaStatusUpdate,
 )
-from app.modules.inventario.models import Producto
+from app.modules.inventario.models import InventarioSucursal, Producto
+from app.modules.inventario.stock_alert import verificar_y_notificar_stock_critico
+from app.modules.notificaciones.service import emitir
 
 router = APIRouter()
 
@@ -68,6 +70,8 @@ def _serializar_reserva(r: Reserva) -> dict:
         "estado": r.estado,
         "total_estimado": r.total_estimado,
         "motivo_cancelacion": r.motivo_cancelacion,
+        "id_sucursal": r.id_sucursal,
+        "sucursal_nombre": r.sucursal.nombre if r.sucursal else None,
         "productos": [
             {
                 "id_detalle": d.id_detalle,
@@ -233,8 +237,11 @@ def crear_reserva(
     # --- crear reserva + detalles + apartar stock ------------------------------
     total = sum(i.cantidad * i.precio_unitario for i in payload.items)
 
+    id_sucursal_reserva = payload.id_sucursal or getattr(usuario_actual, "id_sucursal", None)
+
     reserva = Reserva(
         id_cliente=id_cliente,
+        id_sucursal=id_sucursal_reserva,
         fecha_expiracion=payload.fecha_expiracion,
         estado="PENDIENTE",
         total_estimado=total,
@@ -252,6 +259,55 @@ def crear_reserva(
             )
         )
         encontrados[item.id_producto].stock_total -= item.cantidad
+
+        if id_sucursal_reserva:
+            inv_suc = (
+                db.query(InventarioSucursal)
+                .filter(
+                    InventarioSucursal.id_sucursal == id_sucursal_reserva,
+                    InventarioSucursal.id_producto == item.id_producto,
+                )
+                .with_for_update(of=InventarioSucursal)
+                .first()
+            )
+            if inv_suc:
+                inv_suc.stock = max(0, inv_suc.stock - item.cantidad)
+                verificar_y_notificar_stock_critico(
+                    db,
+                    id_producto=item.id_producto,
+                    id_sucursal=id_sucursal_reserva,
+                    stock_nuevo=inv_suc.stock,
+                    commit=False,
+                )
+
+    # CU10: Notificar al personal operativo (Vendedores y Gerente) de la sucursal sobre la nueva reserva
+    if id_sucursal_reserva:
+        personal_sucursal = (
+            db.query(Usuario)
+            .join(Usuario.rol)
+            .filter(
+                Usuario.id_sucursal == id_sucursal_reserva,
+                Usuario.estado.is_(True),
+                Rol.nombre_rol.in_(["V", "GS"]),
+            )
+            .all()
+        )
+        cant_prendas = sum(i.cantidad for i in payload.items)
+        nom_cliente = f"{cliente.nombre} {cliente.apellido or ''}".strip()
+        for empleado in personal_sucursal:
+            emitir(
+                db,
+                id_usuario=empleado.id_usuario,
+                titulo=f"Nueva Reserva #{reserva.id_reserva}",
+                mensaje=(
+                    f"El cliente {nom_cliente} ha apartado {cant_prendas} prenda(s) "
+                    f"en su sucursal (Total est: Bs. {total:.2f}). Fecha límite: {payload.fecha_expiracion}."
+                ),
+                tipo="PEDIDO",
+                referencia_tipo="reserva",
+                referencia_id=str(reserva.id_reserva),
+                commit=False,
+            )
 
     db.commit()
     db.refresh(reserva)

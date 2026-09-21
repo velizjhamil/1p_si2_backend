@@ -52,7 +52,8 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints.inventario import STOCK_CRITICO, STOCK_MEDIO
 from app.modules.devoluciones.models import DetalleDevolucion, Devolucion
-from app.modules.inventario.models import Categoria, Producto
+from app.modules.empresa.models import Sucursal
+from app.modules.inventario.models import Categoria, InventarioSucursal, Producto
 from app.modules.ventas.models import DetalleVenta, Venta
 
 CANALES_VENTA = ("ONLINE", "POS")
@@ -77,12 +78,13 @@ class ReporteFiltroError(ValueError):
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FiltrosReporte:
-    """Filtros ya validados y normalizados, compartidos por los 4 reportes."""
+    """Filtros ya validados y normalizados, compartidos por los reportes."""
 
     fecha_inicio: date
     fecha_fin: date
     categoria_id: Optional[int] = None
     canal_venta: Optional[str] = None  # 'ONLINE' | 'POS' | None
+    id_sucursal: Optional[int] = None  # Filtro estricto por sucursal (CU17+CU20)
 
     @property
     def dt_inicio(self) -> datetime:
@@ -126,6 +128,7 @@ def construir_filtros(
     fecha_fin: Optional[date] = None,
     categoria_id: Optional[int] = None,
     canal_venta: Optional[str] = None,
+    id_sucursal: Optional[int] = None,
 ) -> FiltrosReporte:
     """Valida y normaliza los filtros. Todos son opcionales.
 
@@ -133,6 +136,7 @@ def construir_filtros(
     - Solo una fecha: la otra se completa (fin=hoy / inicio=fin-29 dias).
     - fecha_inicio > fecha_fin -> ReporteFiltroError.
     - categoria_id debe existir; canal_venta debe ser ONLINE o POS.
+    - id_sucursal debe existir si viene especificado.
     """
     hoy = hoy_utc()
     if fecha_fin is None:
@@ -148,6 +152,9 @@ def construir_filtros(
     if categoria_id is not None and db.get(Categoria, categoria_id) is None:
         raise ReporteFiltroError(f"La categoria {categoria_id} no existe.")
 
+    if id_sucursal is not None and db.get(Sucursal, id_sucursal) is None:
+        raise ReporteFiltroError(f"La sucursal {id_sucursal} no existe.")
+
     canal = None
     if canal_venta:
         canal = canal_venta.strip().upper()
@@ -156,7 +163,7 @@ def construir_filtros(
                 f"canal_venta invalido: use {' o '.join(CANALES_VENTA)}."
             )
 
-    return FiltrosReporte(fecha_inicio, fecha_fin, categoria_id, canal)
+    return FiltrosReporte(fecha_inicio, fecha_fin, categoria_id, canal, id_sucursal)
 
 
 def _dec(valor) -> Decimal:
@@ -178,12 +185,15 @@ def _filtro_canal(f: FiltrosReporte) -> list:
 
 def _condiciones_venta(f: FiltrosReporte) -> list:
     """WHERE comun sobre `ventas`: pagadas, en rango y del canal pedido."""
-    return [
+    conds = [
         Venta.estado_pago == "PAGADO",
         Venta.fecha_venta >= f.dt_inicio,
         Venta.fecha_venta < f.dt_fin_exclusivo,
         *_filtro_canal(f),
     ]
+    if f.id_sucursal is not None:
+        conds.append(Venta.id_sucursal == f.id_sucursal)
+    return conds
 
 
 def _dia_utc(columna):
@@ -575,25 +585,55 @@ def reporte_inventario(
             )
     limite = max(1, min(limite, LIMITE_FILAS_MAX))
 
-    nivel = case(
-        (Producto.stock_total < STOCK_CRITICO, "CRITICO"),
-        (Producto.stock_total < STOCK_MEDIO, "BAJO"),
-        else_="OK",
-    )
     alcance = [Producto.estado != "Inactivo"]
     if f.categoria_id is not None:
         alcance.append(Producto.id_categoria == f.categoria_id)
 
-    agg = (
-        db.query(
-            func.count(Producto.id_producto),
-            func.coalesce(func.sum(Producto.stock_total), 0),
-            func.coalesce(func.sum(Producto.stock_total * Producto.precio_venta), 0),
-            func.coalesce(func.sum(case((Producto.stock_total == 0, 1), else_=0)), 0),
+    if f.id_sucursal is not None:
+        inv_sub = (
+            db.query(
+                InventarioSucursal.id_producto.label("id_producto"),
+                InventarioSucursal.stock.label("stock_suc"),
+            )
+            .filter(InventarioSucursal.id_sucursal == f.id_sucursal)
+            .subquery()
         )
-        .filter(*alcance)
-        .one()
-    )
+        stock_col = func.coalesce(inv_sub.c.stock_suc, 0)
+        nivel = case(
+            (stock_col < STOCK_CRITICO, "CRITICO"),
+            (stock_col < STOCK_MEDIO, "BAJO"),
+            else_="OK",
+        )
+        agg = (
+            db.query(
+                func.count(Producto.id_producto),
+                func.coalesce(func.sum(stock_col), 0),
+                func.coalesce(func.sum(stock_col * Producto.precio_venta), 0),
+                func.coalesce(func.sum(case((stock_col == 0, 1), else_=0)), 0),
+            )
+            .outerjoin(inv_sub, inv_sub.c.id_producto == Producto.id_producto)
+            .filter(*alcance)
+            .one()
+        )
+    else:
+        inv_sub = None
+        stock_col = Producto.stock_total
+        nivel = case(
+            (stock_col < STOCK_CRITICO, "CRITICO"),
+            (stock_col < STOCK_MEDIO, "BAJO"),
+            else_="OK",
+        )
+        agg = (
+            db.query(
+                func.count(Producto.id_producto),
+                func.coalesce(func.sum(stock_col), 0),
+                func.coalesce(func.sum(stock_col * Producto.precio_venta), 0),
+                func.coalesce(func.sum(case((stock_col == 0, 1), else_=0)), 0),
+            )
+            .filter(*alcance)
+            .one()
+        )
+
     total = int(agg[0] or 0)
     if total == 0:
         return ReporteInventario(
@@ -609,7 +649,10 @@ def reporte_inventario(
         )
 
     por_nivel = {n: 0 for n in NIVELES_STOCK}
-    for n, c in db.query(nivel, func.count(Producto.id_producto)).filter(*alcance).group_by(nivel):
+    nivel_q = db.query(nivel, func.count(Producto.id_producto))
+    if inv_sub is not None:
+        nivel_q = nivel_q.outerjoin(inv_sub, inv_sub.c.id_producto == Producto.id_producto)
+    for n, c in nivel_q.filter(*alcance).group_by(nivel):
         por_nivel[n] = int(c)
 
     vendidas = (
@@ -623,26 +666,30 @@ def reporte_inventario(
         .subquery()
     )
 
-    filas = (
+    filas_q = (
         db.query(
             Producto.id_producto,
             Producto.nombre,
             Categoria.id_categoria.label("id_cat"),
             Categoria.nombre.label("cat"),
             Producto.estado,
-            Producto.stock_total,
+            stock_col.label("stock_total"),
             Producto.precio_venta,
             nivel.label("nivel"),
             func.coalesce(vendidas.c.unidades, 0).label("unidades"),
         )
         .join(Categoria, Categoria.id_categoria == Producto.id_categoria)
-        .outerjoin(vendidas, vendidas.c.id_producto == Producto.id_producto)
+    )
+    if inv_sub is not None:
+        filas_q = filas_q.outerjoin(inv_sub, inv_sub.c.id_producto == Producto.id_producto)
+    filas = (
+        filas_q.outerjoin(vendidas, vendidas.c.id_producto == Producto.id_producto)
         .filter(*alcance)
     )
     if nivel_stock:
         filas = filas.filter(nivel == nivel_stock)
     total_filas = filas.count()
-    filas = filas.order_by(Producto.stock_total.asc(), Producto.nombre).limit(limite)
+    filas = filas.order_by(stock_col.asc(), Producto.nombre).limit(limite)
 
     items = []
     for r in filas:
@@ -716,6 +763,8 @@ def reporte_devoluciones(
         )
         if f.categoria_id is not None:
             q = q.filter(Producto.id_categoria == f.categoria_id)
+        if f.id_sucursal is not None:
+            q = q.filter(Venta.id_sucursal == f.id_sucursal)
         if estado:
             q = q.filter(Devolucion.estado == estado)
         return q

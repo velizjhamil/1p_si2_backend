@@ -23,6 +23,7 @@ class ProveedorRead(BaseModel):
     estado: str
     direccion: str | None = None
     sucursal_id: int | None = None
+    sucursal_nombre: str | None = None
     fecha_actualizacion: datetime | None = None
 
 

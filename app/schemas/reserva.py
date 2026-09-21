@@ -32,6 +32,9 @@ class ReservaCreatePayload(BaseModel):
     id_cliente: UUID | None = Field(
         default=None, description="Opcional: cliente a nombre de quien se reserva"
     )
+    id_sucursal: int | None = Field(
+        default=None, description="Opcional: sucursal donde se aparta la prenda"
+    )
     fecha_expiracion: date
     items: list[ReservaItemPayload] = Field(min_length=1)
 
@@ -90,6 +93,7 @@ class ReservaResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id_reserva: int
+    id_sucursal: int | None = None
     cliente: ClienteDetalle
     fecha_reserva: datetime
     fecha_expiracion: date

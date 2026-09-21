@@ -20,6 +20,17 @@ def _envelope(data) -> dict:
     return {"status": "success", "data": data, "message": "Operación exitosa"}
 
 
+def _validar_admin_o_gerente(usuario: Usuario) -> str:
+    """Verifica que el usuario autenticado tenga rol de administrador (ASU o ADMIN) o Gerente de Sucursal (GS)."""
+    nombre_rol = usuario.rol.nombre_rol.upper() if usuario.rol and usuario.rol.nombre_rol else ""
+    if nombre_rol not in ("ASU", "ADMIN", "GS"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido a administradores y gerentes de sucursal.",
+        )
+    return nombre_rol
+
+
 def _validar_admin(usuario: Usuario) -> None:
     """Verifica que el usuario autenticado tenga rol de administrador (ASU o ADMIN)."""
     nombre_rol = usuario.rol.nombre_rol.upper() if usuario.rol and usuario.rol.nombre_rol else ""
@@ -46,12 +57,15 @@ def _obtener_permisos_validados(db: Session, permiso_ids: list[int]) -> list[Per
 
 
 @router.get("/roles", response_model=None)
+@router.get("/roles/", response_model=None)
 def listar_roles(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    """CU4 (lectura): Lista todos los roles con sus permisos heredados — solo Administrador."""
-    _validar_admin(current_user)
+    """CU4 (lectura): Lista todos los roles con sus permisos heredados.
+    Permitido para Administradores (ASU/ADMIN) y Gerentes de Sucursal (GS).
+    """
+    _validar_admin_o_gerente(current_user)
     roles = db.query(Rol).order_by(Rol.nombre_rol).all()
     return _envelope([RolRead.model_validate(r) for r in roles])
 

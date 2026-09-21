@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     agencias,
     auth,
     branches,
+    carrito,
     catalogo,
     categories,
     company,
@@ -18,6 +19,7 @@ from app.api.v1.endpoints import (
     ia,
     inventario,
     notificaciones,
+    pagos,
     probador,
     products,
     reportes,
@@ -110,8 +112,12 @@ app.include_router(products.router, prefix="/api/v1/productos", tags=["Productos
 app.include_router(reservas.router, prefix="/api/v1/reservas", tags=["Reservas"])
 # CU22: inventario/kardex — GET /api/v1/inventario/stock|movimientos, POST movimientos
 app.include_router(inventario.router, prefix="/api/v1/inventario", tags=["Inventario"])
+# CU15: carrito de compras persistente — /api/v1/carrito
+app.include_router(carrito.router, prefix="/api/v1/carrito", tags=["Carrito"])
 # CU15+CU21: carrito/checkout — POST /api/v1/ventas/checkout, GET /api/v1/ventas
 app.include_router(ventas.router, prefix="/api/v1/ventas", tags=["Ventas"])
+# CU15+CU21: pasarela de pagos — POST /api/v1/pagos/procesar, /webhook, /estado, /simular-confirmacion
+app.include_router(pagos.router, prefix="/api/v1/pagos", tags=["Pagos"])
 # CU12: gestion de descuentos/cupones — CRUD /api/v1/descuentos (GS/ASU)
 app.include_router(descuentos.router, prefix="/api/v1/descuentos", tags=["Descuentos"])
 # CU8: probador virtual AR — subir-foto, probar, lookbook, historial

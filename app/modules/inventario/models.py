@@ -15,12 +15,16 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.modules.compras.models import Proveedor
+from app.modules.empresa.models import Sucursal
+from app.modules.usuarios.models import Usuario
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +279,16 @@ class Producto(Base):
     )
 
     # Relaciones
-    categoria: Mapped["Categoria"] = relationship(lazy="joined")
-    proveedor: Mapped["Proveedor | None"] = relationship(lazy="joined")
+    categoria: Mapped["Categoria"] = relationship("Categoria", lazy="joined")
+    proveedor: Mapped["Proveedor | None"] = relationship("Proveedor", lazy="joined")
     tallas: Mapped[list["Talla"]] = relationship(
-        secondary=producto_talla, lazy="selectin", order_by="Talla.id_talla"
+        "Talla", secondary=producto_talla, lazy="selectin", order_by="Talla.id_talla"
     )
     colores: Mapped[list["Color"]] = relationship(
-        secondary=producto_color, lazy="selectin", order_by="Color.id_color"
+        "Color", secondary=producto_color, lazy="selectin", order_by="Color.id_color"
+    )
+    inventarios: Mapped[list["InventarioSucursal"]] = relationship(
+        "InventarioSucursal", back_populates="producto", lazy="selectin"
     )
 
     def __repr__(self) -> str:
@@ -337,10 +344,18 @@ class MovimientoInventario(Base):
     id_usuario: Mapped[str] = mapped_column(
         UUID(as_uuid=True), ForeignKey("usuarios.id_usuario"), nullable=False, index=True
     )
+    # Sucursal donde ocurrió el movimiento (CU17+CU22 multi-sucursal)
+    id_sucursal: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("sucursales.codigo_sucursal", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Relaciones
-    producto: Mapped["Producto"] = relationship(lazy="joined")
-    usuario: Mapped["Usuario"] = relationship(lazy="joined")  # noqa: F821
+    producto: Mapped["Producto"] = relationship("Producto", lazy="joined")
+    usuario: Mapped["Usuario"] = relationship("Usuario", lazy="joined")
+    sucursal: Mapped["Sucursal | None"] = relationship("Sucursal", lazy="joined")
 
     def __repr__(self) -> str:
         return (
@@ -348,3 +363,52 @@ class MovimientoInventario(Base):
             f"tipo={self.tipo!r}, producto={self.id_producto}, "
             f"{self.stock_anterior}->{self.stock_nuevo})>"
         )
+
+
+class InventarioSucursal(Base):
+    """Stock físico de un producto en una sucursal específica (CU17+CU22).
+
+    Aislamiento estricto por tienda: cada sucursal gestiona su propio inventario.
+    """
+
+    __tablename__ = "inventario_sucursal"
+    __table_args__ = (
+        UniqueConstraint("id_sucursal", "id_producto", name="uq_inventario_sucursal_producto"),
+        CheckConstraint("stock >= 0", name="stock_sucursal_no_negativo"),
+        CheckConstraint("stock_minimo >= 0", name="stock_minimo_no_negativo"),
+    )
+
+    id_inventario: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, index=True
+    )
+    id_sucursal: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("sucursales.codigo_sucursal", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    id_producto: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("productos.id_producto", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stock_minimo: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    fecha_actualizacion: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relaciones
+    sucursal: Mapped["Sucursal"] = relationship("Sucursal", lazy="joined")
+    producto: Mapped["Producto"] = relationship("Producto", back_populates="inventarios", lazy="joined")
+
+    def __repr__(self) -> str:
+        return (
+            f"<InventarioSucursal(id={self.id_inventario}, sucursal={self.id_sucursal}, "
+            f"producto={self.id_producto}, stock={self.stock})>"
+        )
+

@@ -2,7 +2,7 @@
 # Paquete "Gestión Usuario" — CU1 Login, CU2 Logout, CU3 Usuarios, CU4 Roles, CU5 Permisos
 # Mapea las tablas REALES de la base de datos tienda_ropa (UUID + columnas en español).
 from datetime import datetime
-from typing import List
+from typing import List, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -19,6 +19,9 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.modules.empresa.models import Sucursal
 
 # ---------------------------------------------------------------------------
 # Tabla de asociación N:M Rol <-> Permiso (herencia de permisos por rol).
@@ -156,13 +159,27 @@ class Usuario(Base):
     fecha_creacion: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # CU17 multi-sucursal: sucursal a la que pertenece el usuario (obligatorio para GS y V)
+    id_sucursal: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("sucursales.codigo_sucursal", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Relaciones
     rol: Mapped["Rol"] = relationship(back_populates="usuarios", lazy="selectin")
+    sucursal: Mapped["Sucursal | None"] = relationship(
+        "Sucursal", foreign_keys=[id_sucursal], back_populates="personal", lazy="joined"
+    )
     # Permisos directos (adicionales a los heredados del rol)
     permisos: Mapped[List["Permiso"]] = relationship(
         secondary=usuario_permiso, lazy="selectin", back_populates="usuarios"
     )
+
+    @property
+    def sucursal_nombre(self) -> str | None:
+        return self.sucursal.nombre if self.sucursal else None
 
     def __repr__(self) -> str:
         return f"<Usuario(id_usuario={self.id_usuario}, correo={self.correo!r})>"
