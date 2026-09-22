@@ -65,17 +65,25 @@ class IAService:
         db: Session,
         consulta: str,
         id_sucursal: Optional[int] = None,
+        genero_usuario: Optional[str] = None,
+        nombre_sucursal: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Extrae datos reales y relevantes de la base de datos para grounding."""
+        """Extrae datos reales y relevantes de la base de datos para grounding con filtrado estricto."""
         hoy = date.today()
+        genero_norm = (genero_usuario or "").strip().capitalize()
 
-        # 1. Categorías activas
-        categorias = (
-            db.query(Categoria)
-            .filter(Categoria.activo.is_(True))
-            .order_by(Categoria.nombre)
-            .all()
-        )
+        # 1. Categorías activas (Filtrado estricto por género)
+        query_categorias = db.query(Categoria).filter(Categoria.activo.is_(True))
+        if genero_norm == "Hombre":
+            query_categorias = query_categorias.filter(
+                Categoria.linea.in_(["Hombre", "Unisex"])
+            )
+        elif genero_norm == "Mujer":
+            query_categorias = query_categorias.filter(
+                Categoria.linea.in_(["Mujer", "Unisex"])
+            )
+
+        categorias = query_categorias.order_by(Categoria.nombre).all()
         categorias_info = [
             f"- [{c.id_categoria}] {c.nombre} (Línea: {c.linea}) - {c.descripcion or ''}".strip()
             for c in categorias
@@ -135,7 +143,7 @@ class IAService:
             for t in temporadas
         ]
 
-        # 4. Búsqueda de Productos Relevantes en Catálogo (CU6, CU7)
+        # 4. Búsqueda de Productos Relevantes en Catálogo con Pre-filtrado por Género y Stock
         palabras = [
             p.lower()
             for p in re.findall(r"\b[a-zA-ZáéíóúÁÉÍÓÚñÑ]{3,}\b", consulta)
@@ -145,6 +153,7 @@ class IAService:
 
         query_prods = (
             db.query(Producto)
+            .join(Producto.categoria)
             .options(
                 joinedload(Producto.categoria),
                 joinedload(Producto.tallas),
@@ -153,6 +162,19 @@ class IAService:
             )
             .filter(Producto.estado == "Activo")
         )
+
+        # REGLA 2: Filtrado obligatorio de colecciones por género
+        if genero_norm == "Hombre":
+            query_prods = query_prods.filter(Categoria.linea.in_(["Hombre", "Unisex"]))
+            # Prohibir terminantemente prendas o categorías exclusivamente femeninas
+            query_prods = query_prods.filter(
+                ~Producto.nombre.ilike("%vestido%"),
+                ~Producto.nombre.ilike("%falda%"),
+                ~Producto.nombre.ilike("%blusa%"),
+                ~Producto.nombre.ilike("%taco%"),
+            )
+        elif genero_norm == "Mujer":
+            query_prods = query_prods.filter(Categoria.linea.in_(["Mujer", "Unisex"]))
 
         filtros_or = []
         for palabra in palabras[:5]:  # Máximo 5 términos clave
@@ -165,7 +187,7 @@ class IAService:
                 query_prods.filter(or_(*filtros_or)).limit(15).all()
             )
 
-        # Complementamos con productos destacados si la búsqueda es muy general
+        # Complementamos con productos destacados de la misma colección permitida
         ids_coincidentes = {p.id_producto for p in productos_coincidentes}
         productos_generales = (
             query_prods.filter(~Producto.id_producto.in_(ids_coincidentes))
@@ -175,22 +197,43 @@ class IAService:
 
         productos_totales = productos_coincidentes + productos_generales
 
+        nombre_suc_tag = nombre_sucursal or "Sucursal Activa"
+
         productos_info = []
         for p in productos_totales[:20]:
             tallas_str = ", ".join([t.nombre_talla for t in p.tallas]) or "Estándar"
             colores_str = ", ".join([c.nombre_color for c in p.colores]) or "Único"
             cat_str = p.categoria.nombre if p.categoria else "General"
+            linea_str = p.categoria.linea if p.categoria else "Unisex"
 
-            # Detalle de stock por sucursal física
+            # Stock real en la sucursal activa
+            stock_en_sucursal_activa = 0
+            if id_sucursal:
+                inv_activo = next(
+                    (inv for inv in (p.inventarios or []) if inv.id_sucursal == id_sucursal),
+                    None,
+                )
+                if inv_activo:
+                    stock_en_sucursal_activa = inv_activo.stock
+
+            # Detalle de stock por todas las sucursales físicas
             stock_por_suc = [
                 f"{inv.sucursal.nombre}: {inv.stock} u."
                 for inv in (p.inventarios or [])
                 if inv.sucursal and inv.stock > 0
             ]
-            stock_detallado = ", ".join(stock_por_suc) if stock_por_suc else "Stock disponible online"
+            stock_detallado = ", ".join(stock_por_suc) if stock_por_suc else "Sin stock físico en sucursales"
+
+            stock_info_text = (
+                f"Stock en {nombre_suc_tag}: {stock_en_sucursal_activa} u. (Otras sucursales: {stock_detallado})"
+                if id_sucursal
+                else f"Disponibilidad por sucursal: ({stock_detallado})"
+            )
 
             productos_info.append(
-                f"- [ID:{p.id_producto}] '{p.nombre}' | Cat: {cat_str} | Precio: Bs {float(p.precio_venta):.2f} | Tallas: {tallas_str} | Colores: {colores_str} | Stock Total: {p.stock_total} ({stock_detallado}) | Desc: {p.descripcion or ''}"
+                f"- [ID:{p.id_producto}] '{p.nombre}' | Colección: {linea_str} | Cat: {cat_str} | "
+                f"Precio: Bs {float(p.precio_venta):.2f} | Tallas: {tallas_str} | Colores: {colores_str} | "
+                f"{stock_info_text} | Stock Total: {p.stock_total} u. | Desc: {p.descripcion or ''}"
             )
 
         return {
@@ -200,60 +243,62 @@ class IAService:
             "temporadas": temporadas_info,
             "productos": productos_info,
             "productos_candidatos": productos_totales,
+            "nombre_sucursal_resuelto": nombre_suc_tag,
         }
 
     @classmethod
     def _construir_system_instruction(
-        cls, contexto: Dict[str, Any], nombre_cliente: Optional[str] = None
+        cls,
+        contexto: Dict[str, Any],
+        nombre_usuario: str,
+        genero_usuario: str,
+        nombre_sucursal: str,
     ) -> str:
-        """Construye el prompt de sistema para el rol de asesora de moda Attention."""
+        """Construye el prompt de sistema unificado para Web y Mobile con regla estricta de género."""
         categorias_txt = "\n".join(contexto["categorias"]) or "No registradas"
         sucursales_txt = "\n".join(contexto["sucursales"]) or "No registradas"
         promos_txt = "\n".join(contexto["promociones"]) or "Sin promociones activas"
         temporadas_txt = "\n".join(contexto.get("temporadas", [])) or "Sin temporadas específicas"
         productos_txt = "\n".join(contexto["productos"]) or "Sin prendas disponibles"
 
-        saludo_cliente = (
-            f"Estás atendiendo personalmente a {nombre_cliente}. Dirígete al cliente de forma cálida por su nombre."
-            if nombre_cliente
-            else "Atiende al cliente con calidez y amabilidad."
-        )
+        return f"""Actúa como un Asistente de Moda Personal avanzado para 'Attention E-Commerce'.
+Conoce al usuario: Nombre: {nombre_usuario}, Género: {genero_usuario}, Sucursal: {nombre_sucursal}.
 
-        return f"""
-Eres "Attention AI", la asesora virtual experta en moda, tendencias y atención al cliente de la prestigiosa tienda de ropa Attention (Bolivia).
-
-OBJETIVO:
-Asesorar de forma cálida, profesional y persuasiva a los clientes respondiendo preguntas sobre prendas, tallas, colores, precios (en Bolivianos 'Bs'), promociones vigentes, temporadas/colecciones, probador virtual y disponibilidad física en sucursales.
-{saludo_cliente}
+Instrucciones estrictas de comportamiento:
+- Utiliza el nombre del usuario ({nombre_usuario}) para personalizar el saludo de forma cálida.
+- **El género del usuario es innegociable:** Si el género es 'Hombre', solo puedes recomendar productos de la categoría 'Hombre' o Unisex. Tienes estrictamente prohibido sugerir prendas femeninas (como vestidos, faldas, blusas). Si el género es 'Mujer', prioriza la categoría 'Mujer'. No mezcles colecciones.
+- Responde consultando el catálogo en tiempo real y el stock disponible en la sucursal {nombre_sucursal}.
+- Ofrece recomendaciones concretas (nombre exacto, precio en Bolivianos 'Bs', tallas y colores) y sugiere acciones como "Ver detalles del envío" o "Consultar stock en otra sucursal".
+- Mantén un tono amigable, profesional y experto en moda.
+- Si no encuentras el producto exacto, sé honesto y ofrece alternativas cercanas de la misma colección.
 
 DIRECTIVAS ESTRICTAS DE RESPUESTA:
-1. INFORMACIÓN FIDEDIGNA: Solo recomienda prendas que figuren en la sección [CATÁLOGO DE PRENDAS DISPONIBLES]. NUNCA inventes productos, precios ni tallas que no existan en la lista.
+1. INFORMACIÓN FIDEDIGNA: Solo recomienda prendas que figuren en la sección [CATÁLOGO DE PRENDAS Y STOCK EN TIEMPO REAL]. NUNCA inventes productos, precios ni tallas que no existan en la lista.
 2. CITACIÓN DE PRODUCTOS: Cada vez que recomiendes una prenda en tu texto, debes incluir su ID numérico en la lista "productos_recomendados".
-3. INFORMACIÓN CORPORATIVA Y SUCURSALES: Si preguntan por horarios, direcciones o disponibilidad en tiendas físicas, utiliza con precisión la sección [SUCURSALES FÍSICAS] y el stock por sucursal indicado en cada producto.
-4. OFERTAS Y TEMPORADAS: Si preguntan por descuentos o colecciones, informa los beneficios de [PROMOCIONES ACTIVAS] y las tendencias de [TEMPORADAS Y COLECCIONES ACTIVAS].
-5. TONO: Amigable, elegante, conciso y en español neutro latinoamericano. Puedes usar formato Markdown (negrita, viñetas).
-6. FORMATO DE SALIDA ESTRICTO: Tu respuesta DEBE SER UN OBJETO JSON VÁLIDO con la siguiente estructura exacta:
+3. VERIFICACIÓN DE SUCURSAL: Indica la disponibilidad física en {nombre_sucursal} según los datos provistos.
+4. FORMATO DE SALIDA ESTRICTO: Tu respuesta DEBE SER UN OBJETO JSON VÁLIDO con la siguiente estructura exacta:
 {{
   "respuesta": "Texto en Markdown para el cliente con la explicación y asesoría.",
   "productos_recomendados": [1, 2],
-  "sugerencias": ["¿En qué colores viene la primera prenda?", "¿Tienen probador virtual?", "¿En qué sucursal la encuentro?"]
+  "sugerencias": ["¿En qué colores viene la primera prenda?", "¿Tienen probador virtual?", "Ver detalles del envío", "Consultar stock en otra sucursal"]
 }}
 
 === DATOS EN TIEMPO REAL DE LA TIENDA ATTENTION ===
 
-[CATEGORÍAS DE PRENDAS]
+[CATEGORÍAS DE PRENDAS DISPONIBLES]
 {categorias_txt}
 
 [TEMPORADAS Y COLECCIONES ACTIVAS]
 {temporadas_txt}
 
-[SUCURSALES FÍSICAS]
+[SUCURSAL ACTIVA Y TODAS LAS TIENDAS FÍSICAS]
+Sucursal de Preferencia: {nombre_sucursal}
 {sucursales_txt}
 
 [PROMOCIONES ACTIVAS]
 {promos_txt}
 
-[CATÁLOGO DE PRENDAS DISPONIBLES]
+[CATÁLOGO DE PRENDAS Y STOCK EN TIEMPO REAL]
 {productos_txt}
 """
 
@@ -331,25 +376,27 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
         consulta: str,
         contexto: Dict[str, Any],
         motivo: str = "",
-        nombre_cliente: Optional[str] = None,
+        nombre_usuario: str = "Cliente",
+        genero_usuario: str = "No especificado",
+        nombre_sucursal: str = "Sucursal Central",
     ) -> ChatResponseData:
         """Genera una respuesta inteligente de degradación elegante basada directamente en la BD."""
         candidatos = contexto.get("productos_candidatos", [])
         ids = [p.id_producto for p in candidatos[:3]]
         detalles = cls._enriquecer_productos(db, ids)
 
-        saludo = f"¡Hola {nombre_cliente}!" if nombre_cliente else "¡Hola!"
+        saludo = f"¡Hola {nombre_usuario}!" if nombre_usuario and nombre_usuario != "Cliente" else "¡Hola!"
         lineas = [
-            f"{saludo} He consultado nuestro catálogo en tiempo real para encontrar las mejores opciones disponibles para ti:\n"
+            f"{saludo} He consultado nuestro catálogo y el stock en tiempo real en la sucursal **{nombre_sucursal}** para encontrar las mejores opciones disponibles para ti:\n"
         ]
         for prod in detalles:
             tallas_txt = ", ".join(prod.tallas) if prod.tallas else "Talla estándar"
             lineas.append(
-                f"- **{prod.nombre}** — *Bs {prod.precio_venta:.2f}* (Tallas: {tallas_txt})"
+                f"- **{prod.nombre}** — *Bs {prod.precio_venta:.2f}* (Tallas: {tallas_txt} | Colección: {prod.linea or 'General'})"
             )
 
         lineas.append(
-            "\n¿Te gustaría ver más opciones o conocer detalles de envíos y sucursales?"
+            f"\n¿Te gustaría ver más opciones de la colección, consultar detalles del envío a domicilio o verificar stock en otra sucursal?"
         )
 
         return ChatResponseData(
@@ -357,8 +404,9 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
             productos_recomendados=ids,
             productos_detalle=detalles,
             sugerencias=[
+                "Ver detalles del envío",
+                "Consultar stock en otra sucursal",
                 "¿Qué promociones tienen vigentes?",
-                "¿Dónde quedan sus sucursales?",
                 "¿Cómo funciona el probador virtual?",
             ],
         )
@@ -371,14 +419,48 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
         usuario_actual: Optional[Usuario] = None,
     ) -> ChatResponseData:
         """Punto de entrada principal: procesa consulta, realiza RAG y llama a Gemini."""
-        nombre_cliente = usuario_actual.nombre if usuario_actual else None
-
-        # 1. Recuperar contexto de la base de datos
-        contexto = cls._recuperar_contexto_db(
-            db, request.mensaje, request.id_sucursal
+        # 1. Resolver nombre del cliente
+        nombre_usuario = (
+            request.nombre_usuario
+            or (usuario_actual.nombre if usuario_actual else None)
+            or "Cliente"
         )
 
-        # 2. Inicializar cliente Gemini
+        # 2. Resolver género del cliente
+        genero_usuario = request.genero_usuario or "No especificado"
+
+        # 3. Resolver ID de sucursal
+        id_sucursal = request.id_sucursal or (
+            usuario_actual.id_sucursal if usuario_actual else None
+        )
+
+        # 4. Resolver nombre de sucursal activa
+        nombre_sucursal = request.nombre_sucursal
+        if not nombre_sucursal and id_sucursal:
+            suc = db.get(Sucursal, id_sucursal)
+            if suc:
+                nombre_sucursal = suc.nombre
+
+        if not nombre_sucursal:
+            primera_suc = (
+                db.query(Sucursal).filter(Sucursal.is_active.is_(True)).first()
+            )
+            nombre_sucursal = (
+                primera_suc.nombre if primera_suc else "Sucursal Central (Santa Cruz)"
+            )
+            if not id_sucursal and primera_suc:
+                id_sucursal = primera_suc.codigo_sucursal
+
+        # 5. Recuperar contexto de la base de datos con grounding y pre-filtrado estricto
+        contexto = cls._recuperar_contexto_db(
+            db,
+            request.mensaje,
+            id_sucursal=id_sucursal,
+            genero_usuario=genero_usuario,
+            nombre_sucursal=nombre_sucursal,
+        )
+
+        # 6. Inicializar cliente Gemini
         client = cls._obtener_cliente_gemini()
         if not client:
             return cls._fallback_respuesta(
@@ -386,11 +468,16 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
                 request.mensaje,
                 contexto,
                 motivo="Cliente Gemini no disponible",
-                nombre_cliente=nombre_cliente,
+                nombre_usuario=nombre_usuario,
+                genero_usuario=genero_usuario,
+                nombre_sucursal=nombre_sucursal,
             )
 
         system_instruction = cls._construir_system_instruction(
-            contexto, nombre_cliente=nombre_cliente
+            contexto,
+            nombre_usuario=nombre_usuario,
+            genero_usuario=genero_usuario,
+            nombre_sucursal=nombre_sucursal,
         )
         settings = get_settings()
 
@@ -406,7 +493,7 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
             if m and m not in modelos_unicos:
                 modelos_unicos.append(m)
 
-        # 3. Construir historial de conversación para Gemini
+        # 7. Construir historial de conversación para Gemini
         contents = []
         for m in request.historial[-6:]:  # Últimos 6 turnos para mantener contexto
             role = "user" if m.rol == "usuario" else "model"
@@ -415,7 +502,7 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
         # Mensaje actual
         contents.append({"role": "user", "parts": [{"text": request.mensaje}]})
 
-        # 4. Invocación a Gemini con manejo robusto de excepciones
+        # 8. Invocación a Gemini con manejo robusto de excepciones
         from google.genai import types
 
         config = types.GenerateContentConfig(
@@ -460,19 +547,20 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
                     except (ValueError, TypeError):
                         continue
 
-                # 5. Enriquecer con datos completos de la base de datos
+                # 9. Enriquecer con datos completos de la base de datos
                 detalles = cls._enriquecer_productos(db, ids_limpios)
 
                 if not sugerencias:
                     sugerencias = [
+                        "Ver detalles del envío",
+                        "Consultar stock en otra sucursal",
                         "¿Tienen probador virtual para estas prendas?",
-                        "¿Cuáles son los horarios de las sucursales?",
                         "¿Tienen algún cupón de descuento vigente?",
                     ]
 
                 return ChatResponseData(
                     respuesta=respuesta_texto
-                    or "¡Hola! Estoy a tu disposición para ayudarte con las prendas de Attention.",
+                    or f"¡Hola {nombre_usuario}! Estoy a tu disposición para ayudarte con las prendas de Attention.",
                     productos_recomendados=ids_limpios,
                     productos_detalle=detalles,
                     sugerencias=sugerencias[:4],
@@ -492,4 +580,7 @@ DIRECTIVAS ESTRICTAS DE RESPUESTA:
             request.mensaje,
             contexto,
             motivo=str(ultimo_error),
+            nombre_usuario=nombre_usuario,
+            genero_usuario=genero_usuario,
+            nombre_sucursal=nombre_sucursal,
         )

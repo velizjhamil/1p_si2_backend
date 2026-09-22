@@ -114,3 +114,29 @@ class SimulacionGuardarPayload(BaseModel):
     """
 
     id_simulacion: int = Field(gt=0)
+
+
+class SimulacionDirectaPayload(BaseModel):
+    """Payload de POST /api/v1/probador-virtual/probar-directo.
+
+    Permite probarse prendas directamente con Privacidad Absoluta y Cero Retención Biométrica.
+    El cliente únicamente envía el identificador del producto dentro del catálogo (Blindaje Anti-SSRF)
+    y la foto en memoria (Data URL o base64). La foto se procesa de forma efímera sin persistirse en DB.
+    """
+
+    producto_id: int = Field(gt=0, description="Identificador del producto en el catálogo")
+    imagen_usuario: str = Field(min_length=10, description="Foto del usuario (Data URL o base64)")
+    talla_seleccionada: str = Field(default="M", min_length=1, max_length=20)
+    color_nombre: str | None = Field(default=None, max_length=50)
+    color_hex: str | None = Field(default=None, max_length=7)
+    estatura_cm: int | None = Field(default=None, ge=100, le=250)
+    peso_kg: int | None = Field(default=None, ge=30, le=300)
+    complexion: str = Field(default="MEDIA", max_length=20)
+
+    @model_validator(mode="after")
+    def _validar_hex(self) -> "SimulacionDirectaPayload":
+        if self.color_hex is not None and not (
+            self.color_hex.startswith("#") and len(self.color_hex) == 7
+        ):
+            raise ValueError("color_hex debe tener formato #RRGGBB.")
+        return self

@@ -56,16 +56,40 @@ class Settings(BaseSettings):
     # como variable de entorno. El fallback es solo para desarrollo local.
     SECRET_KEY: str = "clave_super_secreta_atention_CAMBIAR_EN_PRODUCCION"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 días para desarrollo y móvil
 
     # --- Google Gemini AI API ---
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
-    # --- Nano Banana Pro / Gemini Pro Image API ---
+    # --- Nano Banana Pro / Gemini Pro Image API & Failover ---
     NANO_BANANA_API_KEY: str | None = None
     NANO_BANANA_MODEL: str = "gemini-2.5-flash"
+    IMAGEN_MODEL: str = "imagen-3.0-generate-002"
     TRYON_ALLOW_PASTE_FALLBACK: bool = True
+    # Modo demo: endurece el fallback local (feathering + oclusión + armonización)
+    # para que la presentación en vivo NUNCA devuelva 500 ni una imagen fea.
+    # Default True; poné False en `.env` para producción.
+    TRYON_DEMO_MODE: bool = True
+    # MOCK MODE: si está activo, el probador devuelve imágenes estáticas del
+    # catálogo en `1p_si2_frontend/src/public/` (buscadas por nombre del
+    # producto normalizado) en lugar de llamar a la API de Gemini. Es el modo
+    # recomendado para la presentación del proyecto: cero dependencia de red,
+    # cero cuota, cero latencia de API. La imagen devuelta es la que vos
+    # pongas en la carpeta; si no hay match, se usa el primer mock disponible.
+    # Default True; poné False en `.env` para volver a la IA real.
+    TRYON_MOCK_MODE: bool = True
+    # Carpeta raíz donde se buscan los mocks. Si está vacía, se resuelve
+    # automáticamente desde la raíz del monorepo:
+    #   <monorepo>/1p_si2_frontend/src/public/
+    # Podés sobreescribirla con una ruta absoluta en `.env`.
+    TRYON_MOCK_DIR: str = ""
+    # Latencia simulada (segundos) para que la UI muestre el "spinner" de IA.
+    # Rango: [min, max]. Si max <= min, no se simula latencia.
+    TRYON_MOCK_LATENCY_MIN: float = 1.0
+    TRYON_MOCK_LATENCY_MAX: float = 2.0
+    HF_TOKEN: str | None = None
+    IDM_VTON_API_URL: str | None = None
 
     # --- Pasarela de Pagos (CU15+CU21) ---
     PAYMENT_GATEWAY_SECRET: str = "attention_gateway_secret_2026_x89a"

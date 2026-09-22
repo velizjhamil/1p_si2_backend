@@ -8,10 +8,11 @@
 # de movimientos llegue, la restricción se activa sin tocar este router.
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, inspect, or_, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_db, require_roles
 from app.modules.compras.models import Proveedor
+from app.modules.empresa.models import Sucursal
 from app.modules.inventario.models import Categoria, Color, InventarioSucursal, Producto, Talla
 from app.schemas.producto import (
     ESTADOS_PRODUCTO,
@@ -229,7 +230,14 @@ def listar_productos(
 
     total = query.count()
     items = (
-        query.order_by(Producto.id_producto)
+        query.options(
+            joinedload(Producto.categoria),
+            joinedload(Producto.proveedor),
+            selectinload(Producto.tallas),
+            selectinload(Producto.colores),
+            selectinload(Producto.inventarios).joinedload(InventarioSucursal.sucursal).joinedload(Sucursal.ciudad),
+        )
+        .order_by(Producto.id_producto)
         .offset((page - 1) * limit)
         .limit(limit)
         .all()

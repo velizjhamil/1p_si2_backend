@@ -29,7 +29,11 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.modules.devoluciones.models import Devolucion, DetalleDevolucion
-from app.modules.inventario.models import MovimientoInventario, Producto
+from app.modules.inventario.models import (
+    InventarioSucursal,
+    MovimientoInventario,
+    Producto,
+)
 from app.modules.usuarios.models import Usuario
 from app.modules.ventas.models import DetalleVenta, Venta
 from app.schemas.devolucion import (
@@ -141,10 +145,11 @@ def solicitar_devolucion(
     - Cada detalle_venta_id pertenece a la venta y la cantidad_devuelta
       no supera (cantidad_original - ya_devuelto_en_APROBADA|COMPLETADA).
     """
-    if _rol_nombre(usuario) != "C":
+    rol = _rol_nombre(usuario)
+    if rol not in ("C", "V", "GS", "ASU"):
         raise HTTPException(
             status_code=403,
-            detail="Solo los clientes pueden solicitar devoluciones.",
+            detail="Rol no autorizado para registrar devoluciones.",
         )
 
     venta = db.get(Venta, payload.id_venta)
@@ -153,11 +158,17 @@ def solicitar_devolucion(
             status_code=422,
             detail=f"No existe la venta con id {payload.id_venta}.",
         )
-    if str(venta.id_cliente) != str(usuario.id_usuario):
+    if rol == "C" and str(venta.id_cliente) != str(usuario.id_usuario):
         raise HTTPException(
             status_code=403,
             detail="La venta no pertenece al usuario autenticado.",
         )
+    if rol in ("GS", "V") and usuario.id_sucursal is not None:
+        if venta.id_sucursal is not None and venta.id_sucursal != usuario.id_sucursal:
+            raise HTTPException(
+                status_code=403,
+                detail="No puede registrar devoluciones para ventas de otra sucursal.",
+            )
     if venta.estado_pago != "PAGADO":
         raise HTTPException(
             status_code=422,
@@ -167,10 +178,10 @@ def solicitar_devolucion(
             ),
         )
 
-    # Ventana de tiempo: usamos UTC porque fecha_venta viene TZ-aware de la DB.
+    # Ventana de tiempo: para clientes online aplica la ventana estándar de 24h
     ahora = datetime.now(timezone.utc)
     hace_n = ahora - timedelta(hours=VENTANA_DEVOLUCION_HORAS)
-    if venta.fecha_venta < hace_n:
+    if rol == "C" and venta.fecha_venta < hace_n:
         horas_transcurridas = (ahora - venta.fecha_venta).total_seconds() / 3600
         raise HTTPException(
             status_code=422,
@@ -297,13 +308,15 @@ def listar_devoluciones(
         description="SOLICITADA | APROBADA | RECHAZADA | COMPLETADA",
     ),
     id_venta: Optional[int] = Query(default=None, ge=1),
+    q: Optional[str] = Query(default=None, description="Búsqueda por código de venta, cliente o motivo"),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """CU13: Listado paginado con visibilidad por rol.
 
     - C: solo SUS devoluciones.
-    - V/GS/ASU: todas.
+    - GS/V: devoluciones de su sucursal (o todas si no tienen sucursal asignada).
+    - ASU: todas.
     """
     if estado and estado not in ("SOLICITADA", "APROBADA", "RECHAZADA", "COMPLETADA"):
         raise HTTPException(
@@ -315,9 +328,28 @@ def listar_devoluciones(
         )
 
     query = db.query(Devolucion)
+    rol = _rol_nombre(usuario)
 
-    if _rol_nombre(usuario) == "C":
+    if rol == "C":
         query = query.filter(Devolucion.id_cliente == usuario.id_usuario)
+    elif rol in ("GS", "V") and getattr(usuario, "id_sucursal", None) is not None:
+        query = query.join(Venta, Devolucion.id_venta == Venta.id_venta).filter(
+            or_(Venta.id_sucursal == usuario.id_sucursal, Venta.id_sucursal.is_(None))
+        )
+
+    if q and q.strip():
+        term = f"%{q.strip()}%"
+        # Si no se hizo join previamente con Venta
+        if not (rol in ("GS", "V") and getattr(usuario, "id_sucursal", None) is not None):
+            query = query.join(Venta, Devolucion.id_venta == Venta.id_venta)
+        query = query.filter(
+            or_(
+                Venta.codigo.ilike(term),
+                Venta.nombre_cliente.ilike(term),
+                Devolucion.motivo.ilike(term),
+            )
+        )
+
     if estado:
         query = query.filter(Devolucion.estado == estado)
     if id_venta:
@@ -497,11 +529,11 @@ def procesar_devolucion(
         mensaje = "Devolucion rechazada."
 
     elif payload.accion == "COMPLETAR":
-        if devolucion.estado != "APROBADA":
+        if devolucion.estado not in ("APROBADA", "SOLICITADA"):
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Solo se puede COMPLETAR una devolucion APROBADA. "
+                    f"Solo se puede COMPLETAR una devolucion APROBADA o SOLICITADA. "
                     f"Estado actual: {devolucion.estado}."
                 ),
             )
@@ -521,6 +553,10 @@ def procesar_devolucion(
             f"{devolucion.venta.codigo if devolucion.venta else devolucion.id_venta}"
         )
 
+        sucursal_id = devolucion.venta.id_sucursal if devolucion.venta else getattr(usuario, "id_sucursal", None)
+        if not sucursal_id and getattr(usuario, "id_sucursal", None):
+            sucursal_id = usuario.id_sucursal
+
         monto_total = 0.0
         for det in devolucion.detalles:
             producto = productos_por_id.get(det.id_producto)
@@ -538,6 +574,27 @@ def procesar_devolucion(
             producto.stock_total = stock_anterior + det.cantidad_devuelta
             if producto.estado == "Agotado" and producto.stock_total > 0:
                 producto.estado = "Activo"  # reingreso automatico
+
+            if sucursal_id:
+                inv_suc = (
+                    db.query(InventarioSucursal)
+                    .filter(
+                        InventarioSucursal.id_producto == producto.id_producto,
+                        InventarioSucursal.id_sucursal == sucursal_id,
+                    )
+                    .first()
+                )
+                if inv_suc:
+                    inv_suc.stock += det.cantidad_devuelta
+                else:
+                    db.add(
+                        InventarioSucursal(
+                            id_producto=producto.id_producto,
+                            id_sucursal=sucursal_id,
+                            stock=det.cantidad_devuelta,
+                        )
+                    )
+
             db.add(
                 MovimientoInventario(
                     id_producto=producto.id_producto,
@@ -547,6 +604,7 @@ def procesar_devolucion(
                     stock_nuevo=producto.stock_total,
                     motivo=motivo,
                     id_usuario=usuario.id_usuario,
+                    id_sucursal=sucursal_id,
                 )
             )
             monto_total += float(det.subtotal)

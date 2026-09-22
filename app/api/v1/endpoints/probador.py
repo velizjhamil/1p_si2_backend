@@ -23,6 +23,7 @@ from app.schemas.probador import (
     COMPLEXIONES,
     ORDEN_TALLAS,
     FotoUsuarioPayload,
+    SimulacionDirectaPayload,
     SimulacionGuardarPayload,
     SimulacionPayload,
 )
@@ -123,6 +124,9 @@ def _serializar_simulacion(s: SimulacionProbador) -> dict:
 @router.post(
     "/subir-foto", response_model=None, status_code=status.HTTP_201_CREATED
 )
+@router.post(
+    "/subir-foto/", response_model=None, status_code=status.HTTP_201_CREATED
+)
 def subir_foto(
     payload: FotoUsuarioPayload,
     db: Session = Depends(get_db),
@@ -196,6 +200,7 @@ def fotos_usuario(
 # POST /probar — simulación AR de la prenda sobre la foto
 # ---------------------------------------------------------------------------
 @router.post("/probar", response_model=None, status_code=status.HTTP_201_CREATED)
+@router.post("/probar/", response_model=None, status_code=status.HTTP_201_CREATED)
 def probar_prenda(
     payload: SimulacionPayload,
     db: Session = Depends(get_db),
@@ -244,7 +249,7 @@ def probar_prenda(
         tallas_disponibles=tallas_producto,
         color_nombre=payload.color_nombre,
         color_hex=payload.color_hex,
-        prenda_imagen_url=payload.prenda_imagen_url or producto.imagen_url,
+        prenda_imagen_url=producto.imagen_url,  # Blindaje Anti-SSRF: Solo imagen oficial de DB
         complexion=foto.complexion,
         estatura_cm=foto.estatura_cm,
         peso_kg=foto.peso_kg,
@@ -282,6 +287,104 @@ def probar_prenda(
 
     return _envelope(
         data_simulacion,
+        message="Simulación procesada exitosamente con IA.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /probar-directo — simulación AR directa sin persistencia biométrica
+# ---------------------------------------------------------------------------
+@router.post("/probar-directo", response_model=None, status_code=status.HTTP_200_OK)
+@router.post("/probar-directo/", response_model=None, status_code=status.HTTP_200_OK)
+def probar_prenda_directo(
+    payload: SimulacionDirectaPayload,
+    db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(get_current_user),
+):
+    """Prueba virtual fotorrealista con IA y reglas de seguridad estrictas:
+
+    1. Blindaje Anti-SSRF: Solo se acepta producto_id interno. La imagen oficial
+       de la prenda se extrae exclusivamente del catálogo registrado en la BD.
+    2. Privacidad Absoluta y Cero Retención Biométrica: La fotografía del usuario
+       se procesa en memoria volátil sin persistirse en la base de datos ni en disco.
+    3. Autenticación y Control contra Abuso: Protegido por JWT.
+    4. Enmascaramiento de Errores: Trazas técnicas en logs internos protegidos,
+       entregando al cliente mensajes seguros y amigables.
+    """
+    producto = db.get(Producto, payload.producto_id)
+    if not producto:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No existe la prenda con id {payload.producto_id} en el catálogo.",
+        )
+    if producto.estado != "Activo":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"La prenda '{producto.nombre}' no está disponible actualmente ({producto.estado}).",
+        )
+
+    # Tallas reales del catálogo (autoridad del backend)
+    tallas_producto = [t.nombre_talla for t in producto.tallas]
+    talla_usada = payload.talla_seleccionada.upper()
+    if tallas_producto and talla_usada not in [t.upper() for t in tallas_producto]:
+        talla_usada = tallas_producto[0]
+
+    # Derivación de complexión
+    complexion = payload.complexion
+    if payload.estatura_cm and payload.peso_kg:
+        complexion = _derivar_complexion(payload.estatura_cm, payload.peso_kg)
+
+    # Inferencia con estrategia dual y failover automático
+    import logging
+    _log = logging.getLogger(__name__)
+
+    try:
+        resultado_ia = ProbadorIAService.procesar_simulacion_ar(
+            foto_usuario_data_url=payload.imagen_usuario,
+            producto_nombre=producto.nombre,
+            producto_categoria=producto.categoria.nombre if producto.categoria else "Prenda",
+            talla_elegida=talla_usada,
+            tallas_disponibles=tallas_producto or ["M"],
+            color_nombre=payload.color_nombre,
+            color_hex=payload.color_hex,
+            prenda_imagen_url=producto.imagen_url,  # Blindaje Anti-SSRF: Imagen oficial de DB
+            complexion=complexion,
+            estatura_cm=payload.estatura_cm,
+            peso_kg=payload.peso_kg,
+        )
+    except Exception as exc:
+        # Enmascaramiento de errores técnicos
+        _log.exception(f"Error procesando vestidor virtual para producto {payload.producto_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de vestidor virtual está experimentando una alta demanda. Por favor, intenta de nuevo en unos momentos.",
+        )
+
+    talla_recomendada = resultado_ia.get("talla_recomendada") or _recomendar_talla(
+        complexion, tallas_producto
+    )
+    ajuste = resultado_ia.get("ajuste_estimado") or _estimar_ajuste(
+        talla_usada, talla_recomendada
+    )
+    url_resultado = resultado_ia.get("resultado_imagen_url") or payload.imagen_usuario
+
+    return _envelope(
+        {
+            "producto_id": producto.id_producto,
+            "producto_nombre": producto.nombre,
+            "prenda_imagen_url": producto.imagen_url,
+            "resultado_imagen_url": url_resultado,
+            "talla_seleccionada": talla_usada,
+            "talla_recomendada": talla_recomendada,
+            "ajuste_estimado": ajuste,
+            "color_seleccionado": payload.color_nombre,
+            "color_hex": payload.color_hex,
+            "precio": float(producto.precio_venta),
+            "categoria": producto.categoria.nombre if producto.categoria else None,
+            "comentario_estilo": resultado_ia.get("comentario_estilo"),
+            "gemini_activo": resultado_ia.get("gemini_activo", False),
+            "motor": resultado_ia.get("motor"),
+        },
         message="Simulación procesada exitosamente con IA.",
     )
 

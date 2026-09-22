@@ -32,6 +32,18 @@ class ChatRequest(BaseModel):
         default=None,
         description="ID opcional de sucursal para consultar disponibilidad física",
     )
+    nombre_sucursal: Optional[str] = Field(
+        default=None,
+        description="Nombre descriptivo de la sucursal activa",
+    )
+    genero_usuario: Optional[str] = Field(
+        default=None,
+        description="Género del cliente para filtrado obligatorio de colecciones (Hombre / Mujer)",
+    )
+    nombre_usuario: Optional[str] = Field(
+        default=None,
+        description="Nombre del cliente para personalización del saludo",
+    )
 
 
 class ColorResumen(BaseModel):
