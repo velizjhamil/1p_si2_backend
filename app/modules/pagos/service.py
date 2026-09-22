@@ -39,10 +39,16 @@ def _resolver_sucursal_con_stock(
     items: list,
     ciudad_entrega: str | None = None,
 ) -> int | None:
-    """Selecciona la sucursal más idónea con stock disponible para los items.
+    """Selecciona la sucursal con stock disponible para los items.
     
-    Prioriza sucursales en la misma ciudad de entrega (CU18 logística inteligente).
-    Si ninguna coincide por ciudad, retorna la primera sucursal con stock disponible.
+    Lógica multi-sucursal inteligente e independiente:
+    1. Filtra las sucursales activas que posean inventario suficiente para todos los ítems.
+    2. Si hay ciudad de entrega y sucursales con stock en dicha ciudad:
+       - Si hay múltiples candidatas en la ciudad, elige al azar (load balancing con secrets.choice).
+    3. Si no coinciden por ciudad pero hay sucursales con stock completo:
+       - Elige al azar entre las sucursales con stock disponible (secrets.choice).
+    4. Si ninguna tiene stock completo combinado, busca sucursales con disponibilidad parcial.
+    5. Fallback a una sucursal activa al azar.
     """
     from app.modules.empresa.models import Sucursal
 
@@ -55,13 +61,7 @@ def _resolver_sucursal_con_stock(
     if not sucursales:
         return None
 
-    if ciudad_entrega:
-        c_term = ciudad_entrega.strip().lower()
-        sucursales = sorted(
-            sucursales,
-            key=lambda s: 0 if (s.ciudad and c_term in s.ciudad.nombre.lower()) else 1,
-        )
-
+    candidatas_con_stock: list[Sucursal] = []
     for suc in sucursales:
         tiene_todo = True
         for it in items:
@@ -79,9 +79,41 @@ def _resolver_sucursal_con_stock(
                 tiene_todo = False
                 break
         if tiene_todo:
-            return suc.codigo_sucursal
+            candidatas_con_stock.append(suc)
 
-    return sucursales[0].codigo_sucursal if sucursales else None
+    # Si hay candidatas con stock completo
+    if candidatas_con_stock:
+        if ciudad_entrega:
+            c_term = ciudad_entrega.strip().lower()
+            en_ciudad = [
+                s for s in candidatas_con_stock
+                if s.ciudad and c_term in s.ciudad.nombre.lower()
+            ]
+            if en_ciudad:
+                return secrets.choice(en_ciudad).codigo_sucursal
+        return secrets.choice(candidatas_con_stock).codigo_sucursal
+
+    # Si ninguna tiene stock completo de todos los productos juntos, buscar sucursales con stock parcial
+    sucursales_parciales: list[Sucursal] = []
+    for suc in sucursales:
+        for it in items:
+            pid = getattr(it, "producto_id", None) or getattr(it, "id_producto", None)
+            cant = getattr(it, "cantidad", 1)
+            inv = (
+                db.query(InventarioSucursal)
+                .filter(
+                    InventarioSucursal.id_sucursal == suc.codigo_sucursal,
+                    InventarioSucursal.id_producto == pid,
+                )
+                .first()
+            )
+            if inv and inv.stock >= cant:
+                sucursales_parciales.append(suc)
+                break
+    if sucursales_parciales:
+        return secrets.choice(sucursales_parciales).codigo_sucursal
+
+    return secrets.choice(sucursales).codigo_sucursal
 
 
 def _generar_codigo_venta() -> str:
@@ -227,8 +259,10 @@ def iniciar_transaccion_pago(
     id_sucursal_final = payload.id_sucursal or (
         usuario_actual.id_sucursal if usuario_actual else None
     )
-    if not id_sucursal_final and tipo_entrega == "DOMICILIO":
-        id_sucursal_final = _resolver_sucursal_con_stock(db, payload.items, entrega.ciudad)
+    if not id_sucursal_final:
+        id_sucursal_final = _resolver_sucursal_con_stock(
+            db, payload.items, entrega.ciudad if entrega else None
+        )
 
     codigo_venta = _generar_codigo_venta()
     codigo_txn = _generar_codigo_transaccion()
@@ -250,7 +284,7 @@ def iniciar_transaccion_pago(
         qr_data = _generar_qr_data(codigo_txn, total)
         detalles_pago = f"QR Simple Interoperable generado para {codigo_txn}"
     else:  # EFECTIVO
-        detalles_pago = "Pago en efectivo contra entrega / en caja"
+        detalles_pago = f"Pago en efectivo contra entrega / en caja (Sucursal {id_sucursal_final or 'Central'})"
 
     # Registro de la Venta en estado PENDIENTE
     venta = Venta(
@@ -285,6 +319,48 @@ def iniciar_transaccion_pago(
                 color=item.color,
             )
         )
+
+    # Si es EFECTIVO contra entrega, descontar de inmediato el stock físico de la sucursal seleccionada/asignada
+    if payload.metodo_pago == "EFECTIVO":
+        motivo_kardex = f"Pedido en efectivo contra entrega {venta.codigo} (Sucursal {id_sucursal_final or 'Central'})"
+        for item, producto, precio, subtotal in lineas:
+            stock_anterior = producto.stock_total
+            producto.stock_total = max(0, stock_anterior - item.cantidad)
+            if producto.stock_total == 0:
+                producto.estado = "Agotado"
+
+            if id_sucursal_final:
+                inv_suc = (
+                    db.query(InventarioSucursal)
+                    .filter(
+                        InventarioSucursal.id_sucursal == id_sucursal_final,
+                        InventarioSucursal.id_producto == producto.id_producto,
+                    )
+                    .with_for_update(of=InventarioSucursal)
+                    .first()
+                )
+                if inv_suc:
+                    inv_suc.stock = max(0, inv_suc.stock - item.cantidad)
+                    verificar_y_notificar_stock_critico(
+                        db,
+                        id_producto=producto.id_producto,
+                        id_sucursal=id_sucursal_final,
+                        stock_nuevo=inv_suc.stock,
+                        commit=False,
+                    )
+
+            db.add(
+                MovimientoInventario(
+                    id_producto=producto.id_producto,
+                    tipo="SALIDA",
+                    cantidad=item.cantidad,
+                    stock_anterior=stock_anterior,
+                    stock_nuevo=producto.stock_total,
+                    motivo=motivo_kardex,
+                    id_usuario=id_cliente_final,
+                    id_sucursal=id_sucursal_final,
+                )
+            )
 
     # Registro de la Transacción en Pasarela
     transaccion = TransaccionPago(
@@ -352,64 +428,67 @@ def _liquidar_venta_transaccional(
     )
     prod_map = {p.id_producto: p for p in productos}
 
-    for det in detalles:
-        prod = prod_map.get(det.id_producto)
-        if not prod:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Producto {det.id_producto} no encontrado.",
-            )
-        if prod.stock_total < det.cantidad:
-            if transaccion:
-                transaccion.estado = "RECHAZADO"
-            venta.estado_pago = "RECHAZADO"
-            db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Stock insuficiente para '{prod.nombre}': disponible {prod.stock_total}, solicitado {det.cantidad}.",
-            )
+    ya_descontado = bool(venta.metodo_pago == "EFECTIVO")
 
-    motivo_kardex = f"Venta {venta.codigo} confirmada por {pasarela_nombre} (Ref: {referencia_pago})"
-
-    for det in detalles:
-        prod = prod_map[det.id_producto]
-        stock_anterior = prod.stock_total
-        prod.stock_total = max(0, stock_anterior - det.cantidad)
-        if prod.stock_total == 0:
-            prod.estado = "Agotado"
-
-        if venta.id_sucursal:
-            inv_suc = (
-                db.query(InventarioSucursal)
-                .filter(
-                    InventarioSucursal.id_sucursal == venta.id_sucursal,
-                    InventarioSucursal.id_producto == prod.id_producto,
+    if not ya_descontado:
+        for det in detalles:
+            prod = prod_map.get(det.id_producto)
+            if not prod:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Producto {det.id_producto} no encontrado.",
                 )
-                .with_for_update(of=InventarioSucursal)
-                .first()
-            )
-            if inv_suc:
-                inv_suc.stock = max(0, inv_suc.stock - det.cantidad)
-                verificar_y_notificar_stock_critico(
-                    db,
+            if prod.stock_total < det.cantidad:
+                if transaccion:
+                    transaccion.estado = "RECHAZADO"
+                venta.estado_pago = "RECHAZADO"
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Stock insuficiente para '{prod.nombre}': disponible {prod.stock_total}, solicitado {det.cantidad}.",
+                )
+
+        motivo_kardex = f"Venta {venta.codigo} confirmada por {pasarela_nombre} (Ref: {referencia_pago})"
+
+        for det in detalles:
+            prod = prod_map[det.id_producto]
+            stock_anterior = prod.stock_total
+            prod.stock_total = max(0, stock_anterior - det.cantidad)
+            if prod.stock_total == 0:
+                prod.estado = "Agotado"
+
+            if venta.id_sucursal:
+                inv_suc = (
+                    db.query(InventarioSucursal)
+                    .filter(
+                        InventarioSucursal.id_sucursal == venta.id_sucursal,
+                        InventarioSucursal.id_producto == prod.id_producto,
+                    )
+                    .with_for_update(of=InventarioSucursal)
+                    .first()
+                )
+                if inv_suc:
+                    inv_suc.stock = max(0, inv_suc.stock - det.cantidad)
+                    verificar_y_notificar_stock_critico(
+                        db,
+                        id_producto=prod.id_producto,
+                        id_sucursal=venta.id_sucursal,
+                        stock_nuevo=inv_suc.stock,
+                        commit=False,
+                    )
+
+            db.add(
+                MovimientoInventario(
                     id_producto=prod.id_producto,
+                    tipo="SALIDA",
+                    cantidad=det.cantidad,
+                    stock_anterior=stock_anterior,
+                    stock_nuevo=prod.stock_total,
+                    motivo=motivo_kardex,
+                    id_usuario=venta.id_cliente,
                     id_sucursal=venta.id_sucursal,
-                    stock_nuevo=inv_suc.stock,
-                    commit=False,
                 )
-
-        db.add(
-            MovimientoInventario(
-                id_producto=prod.id_producto,
-                tipo="SALIDA",
-                cantidad=det.cantidad,
-                stock_anterior=stock_anterior,
-                stock_nuevo=prod.stock_total,
-                motivo=motivo_kardex,
-                id_usuario=venta.id_cliente,
-                id_sucursal=venta.id_sucursal,
             )
-        )
 
     venta.estado_pago = "PAGADO"
     if transaccion:
@@ -1096,8 +1175,10 @@ def crear_sesion_checkout_stripe(
     id_sucursal_final = payload.id_sucursal or (
         usuario_actual.id_sucursal if usuario_actual else None
     )
-    if not id_sucursal_final and tipo_entrega == "DOMICILIO":
-        id_sucursal_final = _resolver_sucursal_con_stock(db, payload.items, entrega.ciudad)
+    if not id_sucursal_final:
+        id_sucursal_final = _resolver_sucursal_con_stock(
+            db, payload.items, entrega.ciudad if entrega else None
+        )
 
     codigo_venta = _generar_codigo_venta()
 

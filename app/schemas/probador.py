@@ -66,6 +66,7 @@ class SimulacionPayload(BaseModel):
     talla_seleccionada: str = Field(min_length=1, max_length=20)
     color_nombre: str | None = Field(default=None, max_length=50)
     color_hex: str | None = Field(default=None, max_length=7)
+    prenda_imagen_url: str | None = Field(default=None)
 
     @model_validator(mode="after")
     def _validar_hex(self) -> "SimulacionPayload":
@@ -101,6 +102,9 @@ class SimulacionResponse(BaseModel):
     categoria: str | None = None
     fecha_simulacion: datetime
     guardada: bool = False
+    gemini_activo: bool = False
+    motor: str | None = None
+    comentario_estilo: str | None = None
 
 
 class SimulacionGuardarPayload(BaseModel):

@@ -116,10 +116,16 @@ def _resolver_sucursal_con_stock(
     items: list,
     ciudad_entrega: str | None = None,
 ) -> int | None:
-    """Selecciona la sucursal más idónea con stock disponible para los items.
+    """Selecciona la sucursal con stock disponible para los items.
     
-    Prioriza sucursales en la misma ciudad de entrega (CU18 logística inteligente).
-    Si ninguna coincide por ciudad, retorna la primera sucursal con stock disponible.
+    Lógica multi-sucursal inteligente e independiente:
+    1. Filtra las sucursales activas que posean inventario suficiente para todos los ítems.
+    2. Si hay ciudad de entrega y sucursales con stock en dicha ciudad:
+       - Si hay múltiples candidatas en la ciudad, elige al azar (load balancing con secrets.choice).
+    3. Si no coinciden por ciudad pero hay sucursales con stock completo:
+       - Elige al azar entre las sucursales con stock disponible (secrets.choice).
+    4. Si ninguna tiene stock completo combinado, busca sucursales con disponibilidad parcial.
+    5. Fallback a una sucursal activa al azar.
     """
     from app.modules.empresa.models import Sucursal
 
@@ -132,13 +138,7 @@ def _resolver_sucursal_con_stock(
     if not sucursales:
         return None
 
-    if ciudad_entrega:
-        c_term = ciudad_entrega.strip().lower()
-        sucursales = sorted(
-            sucursales,
-            key=lambda s: 0 if (s.ciudad and c_term in s.ciudad.nombre.lower()) else 1,
-        )
-
+    candidatas_con_stock: list[Sucursal] = []
     for suc in sucursales:
         tiene_todo = True
         for it in items:
@@ -156,9 +156,41 @@ def _resolver_sucursal_con_stock(
                 tiene_todo = False
                 break
         if tiene_todo:
-            return suc.codigo_sucursal
+            candidatas_con_stock.append(suc)
 
-    return sucursales[0].codigo_sucursal if sucursales else None
+    # Si hay candidatas con stock completo
+    if candidatas_con_stock:
+        if ciudad_entrega:
+            c_term = ciudad_entrega.strip().lower()
+            en_ciudad = [
+                s for s in candidatas_con_stock
+                if s.ciudad and c_term in s.ciudad.nombre.lower()
+            ]
+            if en_ciudad:
+                return secrets.choice(en_ciudad).codigo_sucursal
+        return secrets.choice(candidatas_con_stock).codigo_sucursal
+
+    # Si ninguna tiene stock completo de todos los productos juntos, buscar sucursales con stock parcial
+    sucursales_parciales: list[Sucursal] = []
+    for suc in sucursales:
+        for it in items:
+            pid = getattr(it, "producto_id", None) or getattr(it, "id_producto", None)
+            cant = getattr(it, "cantidad", 1)
+            inv = (
+                db.query(InventarioSucursal)
+                .filter(
+                    InventarioSucursal.id_sucursal == suc.codigo_sucursal,
+                    InventarioSucursal.id_producto == pid,
+                )
+                .first()
+            )
+            if inv and inv.stock >= cant:
+                sucursales_parciales.append(suc)
+                break
+    if sucursales_parciales:
+        return secrets.choice(sucursales_parciales).codigo_sucursal
+
+    return secrets.choice(sucursales).codigo_sucursal
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +321,10 @@ def _procesar_venta(
         "RETIRO" if id_vendedor_final else "DOMICILIO"
     )
     id_sucursal_final = payload.id_sucursal or (usuario_actual.id_sucursal if usuario_actual else None)
-    if not id_sucursal_final and tipo_entrega == "DOMICILIO":
-        id_sucursal_final = _resolver_sucursal_con_stock(db, payload.items, entrega.ciudad)
+    if not id_sucursal_final:
+        id_sucursal_final = _resolver_sucursal_con_stock(
+            db, payload.items, entrega.ciudad if entrega else None
+        )
 
     venta = Venta(
         id_cliente=id_cliente_final,

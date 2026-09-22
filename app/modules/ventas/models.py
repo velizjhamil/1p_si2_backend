@@ -17,6 +17,9 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.modules.empresa.models import Sucursal
+from app.modules.inventario.models import Producto
+from app.modules.usuarios.models import Usuario
 
 
 class Reserva(Base):
@@ -59,6 +62,37 @@ class Reserva(Base):
         ForeignKey("sucursales.codigo_sucursal", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+    # CU14: Política de anticipo 50% y expiración a 48h con reembolso parcial 50%
+    monto_anticipo: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0
+    )
+    monto_anticipo_pagado: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0
+    )
+    monto_reembolsado: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0
+    )
+    monto_penalizacion: Mapped[float] = mapped_column(
+        Numeric(10, 2), nullable=False, default=0
+    )
+    metodo_pago_anticipo: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    codigo_transaccion_anticipo: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    fecha_confirmacion: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    fecha_expiracion_dt: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Modalidad de entrega: RETIRO (en tienda) o DOMICILIO (contra entrega)
+    tipo_entrega: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="RETIRO"
+    )
+    direccion_entrega: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    telefono_entrega: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
     )
 
     # Relaciones

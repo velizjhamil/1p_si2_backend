@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
+    # --- Nano Banana Pro / Gemini Pro Image API ---
+    NANO_BANANA_API_KEY: str | None = None
+    NANO_BANANA_MODEL: str = "gemini-2.5-flash"
+    TRYON_ALLOW_PASTE_FALLBACK: bool = True
+
     # --- Pasarela de Pagos (CU15+CU21) ---
     PAYMENT_GATEWAY_SECRET: str = "attention_gateway_secret_2026_x89a"
     PAYMENT_GATEWAY_NAME: str = "AttentionPay"

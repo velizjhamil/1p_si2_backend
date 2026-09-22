@@ -26,6 +26,7 @@ from app.schemas.probador import (
     SimulacionGuardarPayload,
     SimulacionPayload,
 )
+from app.services.probador_ia_service import ProbadorIAService
 
 router = APIRouter()
 
@@ -234,15 +235,34 @@ def probar_prenda(
             ),
         )
 
-    # Motor de recomendación (misma semántica del mock)
-    talla_recomendada = _recomendar_talla(foto.complexion, tallas_producto)
-    ajuste = _estimar_ajuste(payload.talla_seleccionada, talla_recomendada)
+    # Motor de simulación AR con Google Gemini + Composición fotográfica en Pillow
+    resultado_ia = ProbadorIAService.procesar_simulacion_ar(
+        foto_usuario_data_url=foto.url_imagen,
+        producto_nombre=producto.nombre,
+        producto_categoria=producto.categoria.nombre if producto.categoria else "Prenda",
+        talla_elegida=payload.talla_seleccionada,
+        tallas_disponibles=tallas_producto,
+        color_nombre=payload.color_nombre,
+        color_hex=payload.color_hex,
+        prenda_imagen_url=payload.prenda_imagen_url or producto.imagen_url,
+        complexion=foto.complexion,
+        estatura_cm=foto.estatura_cm,
+        peso_kg=foto.peso_kg,
+    )
+
+    talla_recomendada = resultado_ia.get("talla_recomendada") or _recomendar_talla(
+        foto.complexion, tallas_producto
+    )
+    ajuste = resultado_ia.get("ajuste_estimado") or _estimar_ajuste(
+        payload.talla_seleccionada, talla_recomendada
+    )
+    url_resultado = resultado_ia.get("resultado_imagen_url") or foto.url_imagen
 
     simulacion = SimulacionProbador(
         id_usuario=usuario_actual.id_usuario,
         id_producto=producto.id_producto,
         id_foto=foto.id_foto,
-        url_resultado=foto.url_imagen,  # el overlay AR lo dibuja el frontend
+        url_resultado=url_resultado,
         talla_elegida=payload.talla_seleccionada.upper(),
         talla_recomendada=talla_recomendada,
         ajuste_estimado=ajuste,
@@ -253,9 +273,16 @@ def probar_prenda(
     db.commit()
     db.refresh(simulacion)
 
+    data_simulacion = _serializar_simulacion(simulacion)
+    if "comentario_estilo" in resultado_ia:
+        data_simulacion["comentario_estilo"] = resultado_ia["comentario_estilo"]
+    data_simulacion["gemini_activo"] = resultado_ia.get("gemini_activo", False)
+    if "motor" in resultado_ia:
+        data_simulacion["motor"] = resultado_ia["motor"]
+
     return _envelope(
-        _serializar_simulacion(simulacion),
-        message="Simulación procesada correctamente.",
+        data_simulacion,
+        message="Simulación procesada exitosamente con IA.",
     )
 
 
